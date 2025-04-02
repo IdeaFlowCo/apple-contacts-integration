@@ -2,25 +2,53 @@
 
 import { fileURLToPath } from "url";
 import { resolve } from "path";
-import { execSync } from "child_process"; // Added for executing Python script
+import { execSync } from "child_process"; // For executing Python script
 import {
     MewAPI,
     parseNodeIdFromUrl,
-    GraphNode,
+    getNodeTextContent,
     Relation,
-    createNodeContent,
-} from "./MewService.js";
-// We might need a logger later, let's keep this import commented for now
-// import { Logger } from "./utils/logger";
+    AppleContact,
+} from "./MewService.js"; // Assuming MewService exports necessary types
+import console from "console";
 
-// const logger = new Logger("MewContacts");
+// --- Type Definitions ---
 
+/** Represents the structure of contact data expected from the Python script. */
+// Moved to MewService.ts: export interface AppleContact { ... }
+
+/**
+ * Holds information about a contact already existing in Mew, including its ID
+ * and a map of its properties fetched upfront.
+ */
+interface ExistingContactInfo {
+    mewId: string; // The Mew Node ID of the main contact node
+    name: string | null; // Pre-fetched display name of the contact node
+    properties: Map<string, { propertyNodeId: string; value: string | null }>; // Map<RelationLabel, { PropertyNodeID, Value }>
+}
+
+// --- Globals & Constants ---
+
+/** Mew API instance used throughout the script. */
 export const mewApi = new MewAPI();
 
-// Global variable to hold the user root URL provided via CLI argument
+/** Global variable to hold the user root URL provided via CLI argument. Set in processContacts. */
 let userRootUrlGlobal: string | null = null;
 
-// Helper to get the user ID - uses the globally set userRootUrl
+/** Defines the standard folder name under which contacts will be synced in Mew. */
+const myContactsFolderName = "My Contacts";
+
+/** Number of contacts to include in each batch creation request. */
+const BATCH_CHUNK_SIZE = 50;
+
+// --- Helper Functions ---
+
+/**
+ * Retrieves the Mew User ID by parsing the globally set user root URL.
+ * Sets the user ID in the MewAPI instance upon first retrieval.
+ * @throws {Error} If the global user root URL is not set or invalid.
+ * @returns {Promise<string>} The Mew User ID.
+ */
 async function getUserId(): Promise<string> {
     if (!userRootUrlGlobal) {
         throw new Error(
@@ -42,26 +70,12 @@ async function getUserId(): Promise<string> {
     }
 }
 
-// Helper function to get the text content of a simple text node
-function getNodeTextContent(node: GraphNode | null): string | null {
-    if (
-        node &&
-        node.content &&
-        node.content.length > 0 &&
-        node.content[0].type === "text"
-    ) {
-        return node.content[0].value;
-    }
-    return null;
-}
-
-// Define the standard folder name for contacts
-const myContactsFolderName = "My Contacts";
-
 /**
- * Ensures that the "My Contacts" folder exists in Mew under the user's root node.
- * Finds the existing folder or creates a new one if it doesn't exist.
- * @returns The Node ID of the "My Contacts" folder.
+ * Ensures that the target folder (defined by `myContactsFolderName`) exists in Mew
+ * under the user's root node. Finds the existing folder or creates a new one.
+ * @returns {Promise<{ folderId: string; created: boolean }>} An object containing the Node ID
+ *          of the folder and a boolean indicating if it was newly created in this run.
+ * @throws {Error} If unable to get user ID or create/find the folder.
  */
 export async function ensureMyContactsFolder(): Promise<{
     folderId: string;
@@ -129,245 +143,327 @@ export async function ensureMyContactsFolder(): Promise<{
     }
 }
 
-// Placeholder type for Apple Contact data (replace with actual structure)
-interface AppleContact {
-    identifier: string; // Unique ID from Apple Contacts
-    givenName?: string;
-    familyName?: string;
-    organizationName?: string;
-    phoneNumbers?: { label: string; value: string }[];
-    emailAddresses?: { label: string; value: string }[];
-    // Add other relevant fields: postalAddresses, birthday, note etc.
-}
-
 /**
- * Finds the Mew node corresponding to an Apple Contact identifier.
- * @param identifier The Apple Contact's unique identifier.
- * @param contactsFolderId The Node ID of the "My Contacts" folder.
- * @returns The GraphNode of the contact if found, otherwise null.
+ * Fetches detailed information about contacts already existing in the Mew folder.
+ * Retrieves child nodes, fetches their layer data (including properties),
+ * and builds a map for efficient lookup and update checking.
+ * @param contactsFolderId The Node ID of the parent contacts folder in Mew.
+ * @returns {Promise<Map<string, ExistingContactInfo>>} A Map where keys are Apple Contact Identifiers
+ *          and values contain the Mew ID, name, and a map of existing properties.
  */
-async function findContactNodeByIdentifier(
-    identifier: string,
+async function fetchExistingContactInfo(
     contactsFolderId: string
-): Promise<GraphNode | null> {
+): Promise<Map<string, ExistingContactInfo>> {
+    const existingContactsMap = new Map<string, ExistingContactInfo>();
     console.log(
-        `[MewContacts] Searching for contact with Apple ID: ${identifier} under folder ${contactsFolderId}`
+        `[MewContacts] Fetching existing contact info from folder: ${contactsFolderId}`
     );
 
+    // --- Step 1: Get Child Node IDs ---
+    let childNodeIds: string[] = [];
     try {
-        // 1. Get all child nodes (potential contact nodes) of contactsFolderId.
         const { childNodes: potentialContactNodes } =
-            await mewApi.getChildNodes({ parentNodeId: contactsFolderId });
-
-        // 2. For each potential contact node, check its children for the appleContactId relation.
-        for (const contactNode of potentialContactNodes) {
-            if (!contactNode) continue; // Skip if node data is missing
-
-            // console.log(`[MewContacts] Checking potential contact node: ${contactNode.id}`); // Verbose logging
-
-            // 2a. Get its relations and the layer data needed to check labels.
-            const layerData = await mewApi.getLayerData([contactNode.id]); // Fetch data for this node and potentially its children/labels
-            const relations = Object.values(
-                layerData.data.relationsById
-            ).filter(
-                (rel): rel is Relation =>
-                    rel !== null &&
-                    typeof rel === "object" &&
-                    "fromId" in rel &&
-                    rel.fromId === contactNode.id
-            );
-
-            // 2b & 2c. Find the relation with label "appleContactId"
-            const idRelation = relations.find((rel) => {
-                const typeRelationId = rel.canonicalRelationId;
-                if (typeRelationId) {
-                    // Need to ensure the label node and its defining relation are in the layer data
-                    // It's possible getLayerData([contactNode.id]) doesn't fetch label nodes two steps away
-                    // A safer approach might be to fetch layer data for contactNode.id and all related node IDs (rel.toId)
-                    const typeRelation =
-                        layerData.data.relationsById[typeRelationId];
-                    if (
-                        typeRelation &&
-                        typeRelation.relationTypeId === "__type__"
-                    ) {
-                        const labelNodeId = typeRelation.toId;
-                        const labelNode = layerData.data.nodesById[labelNodeId];
-                        const labelText = getNodeTextContent(labelNode);
-                        // console.log(`[MewContacts] Node ${contactNode.id} has relation with label: ${labelText}`); // Verbose logging
-                        return labelText === "appleContactId";
-                    }
-                }
-                return false;
+            await mewApi.getChildNodes({
+                parentNodeId: contactsFolderId,
             });
+        if (!potentialContactNodes || potentialContactNodes.length === 0) {
+            console.log(
+                "[MewContacts] No existing child nodes found in folder."
+            );
+            return existingContactsMap; // Return empty map
+        }
+        childNodeIds = potentialContactNodes
+            .map((node) => node?.id)
+            .filter((id): id is string => !!id);
 
-            if (idRelation) {
-                const idNodeId = idRelation.toId;
-                const idNode = layerData.data.nodesById[idNodeId];
+        if (childNodeIds.length === 0) {
+            console.log("[MewContacts] Child nodes found but missing IDs.");
+            return existingContactsMap;
+        }
+        console.log(`[MewContacts] Found ${childNodeIds.length} child nodes.`);
+    } catch (error) {
+        console.error("[MewContacts] Error getting child nodes:", error);
+        return existingContactsMap; // Return empty map on error
+    }
 
-                // 2d. Compare the content value.
-                const storedIdentifier = getNodeTextContent(idNode);
-                // console.log(`[MewContacts] Found appleContactId node ${idNodeId} with value: ${storedIdentifier}`); // Verbose logging
+    // --- Step 2: First Layer Fetch (Children + Direct Relations) ---
+    console.log(
+        `[MewContacts] Fetching initial layer data for ${childNodeIds.length} nodes...`
+    );
+    let combinedLayerData: any = { data: { nodesById: {}, relationsById: {} } }; // Initialize structure
+    let directRelationTargetIds = new Set<string>();
+    let directCanonicalRelationIds = new Set<string>();
 
-                if (storedIdentifier === identifier) {
-                    console.log(
-                        `[MewContacts] Match found! Returning contact node: ${contactNode.id}`
-                    );
-                    return contactNode; // Found the matching contact node
+    try {
+        const initialLayerData = await mewApi.getLayerData(childNodeIds);
+        // Merge initial data
+        Object.assign(
+            combinedLayerData.data.nodesById,
+            initialLayerData.data.nodesById
+        );
+        Object.assign(
+            combinedLayerData.data.relationsById,
+            initialLayerData.data.relationsById
+        );
+
+        // Find IDs needed for the second fetch
+        for (const nodeId of childNodeIds) {
+            const relations = Object.values(
+                initialLayerData.data.relationsById
+            ).filter(
+                (rel: any): rel is Relation => rel && rel.fromId === nodeId
+            );
+            for (const rel of relations) {
+                directRelationTargetIds.add(rel.toId); // Property value node IDs
+                if (rel.canonicalRelationId) {
+                    directCanonicalRelationIds.add(rel.canonicalRelationId); // Type relation IDs
                 }
             }
-            // else {
-            // console.log(`[MewContacts] No appleContactId relation found for node ${contactNode.id}`); // Verbose logging
-            // }
         }
-
-        // 3. If no match found after checking all children.
         console.log(
-            `[MewContacts] No contact node found with Apple ID: ${identifier}`
+            `[MewContacts] Initial fetch complete. Found ${directRelationTargetIds.size} direct targets and ${directCanonicalRelationIds.size} canonical relations.`
         );
-        return null;
     } catch (error) {
         console.error(
-            `[MewContacts] Error in findContactNodeByIdentifier for ID ${identifier}:`,
+            "[MewContacts] Error fetching initial layer data:",
             error
         );
-        return null; // Return null on error
+        // Proceed with potentially incomplete data? Or return error?
+        // For now, log and continue, map might be incomplete.
     }
+
+    // --- Step 3: Second Layer Fetch (Property Values, Type Relations, Labels) ---
+    const secondFetchIds = [
+        ...Array.from(directRelationTargetIds).filter(
+            (id) => !combinedLayerData.data.nodesById[id]
+        ), // Only fetch missing target nodes
+        ...Array.from(directCanonicalRelationIds).filter(
+            (id) => !combinedLayerData.data.relationsById[id]
+        ), // Only fetch missing canonical relations
+    ];
+    let thirdFetchIds = new Set<string>(); // For label nodes from type relations
+
+    if (secondFetchIds.length > 0) {
+        console.log(
+            `[MewContacts] Fetching second layer data for ${secondFetchIds.length} missing related objects...`
+        );
+        try {
+            const secondLayerData = await mewApi.getLayerData(secondFetchIds);
+            // Merge second layer data
+            Object.assign(
+                combinedLayerData.data.nodesById,
+                secondLayerData.data.nodesById
+            );
+            Object.assign(
+                combinedLayerData.data.relationsById,
+                secondLayerData.data.relationsById
+            );
+            console.log("[MewContacts] Second fetch complete.");
+
+            // Find label node IDs from newly fetched canonical relations
+            for (const relId of directCanonicalRelationIds) {
+                const typeRelation =
+                    combinedLayerData.data.relationsById[relId];
+                if (
+                    typeRelation &&
+                    typeRelation.relationTypeId === "__type__"
+                ) {
+                    if (!combinedLayerData.data.nodesById[typeRelation.toId]) {
+                        thirdFetchIds.add(typeRelation.toId); // Label node IDs
+                    }
+                }
+            }
+        } catch (error) {
+            console.error(
+                "[MewContacts] Error fetching second layer data:",
+                error
+            );
+            // Proceed with potentially incomplete data?
+        }
+    } else {
+        console.log(
+            "[MewContacts] No second fetch needed based on initial data."
+        );
+        // Still need to check for label nodes from initially fetched type relations
+        for (const relId of directCanonicalRelationIds) {
+            const typeRelation = combinedLayerData.data.relationsById[relId];
+            if (typeRelation && typeRelation.relationTypeId === "__type__") {
+                if (!combinedLayerData.data.nodesById[typeRelation.toId]) {
+                    thirdFetchIds.add(typeRelation.toId); // Label node IDs
+                }
+            }
+        }
+    }
+
+    // --- Step 4: Third Layer Fetch (Label Nodes) ---
+    if (thirdFetchIds.size > 0) {
+        const thirdFetchIdsArray = Array.from(thirdFetchIds);
+        console.log(
+            `[MewContacts] Fetching third layer data for ${thirdFetchIdsArray.length} missing label nodes...`
+        );
+        try {
+            const thirdLayerData = await mewApi.getLayerData(
+                thirdFetchIdsArray
+            );
+            Object.assign(
+                combinedLayerData.data.nodesById,
+                thirdLayerData.data.nodesById
+            );
+            console.log("[MewContacts] Third fetch complete (label nodes).");
+        } catch (error) {
+            console.error(
+                "[MewContacts] Error fetching third layer data (label nodes):",
+                error
+            );
+        }
+    }
+
+    // Remove diagnostic logging for now
+    // --- BEGIN DIAGNOSTIC LOGGING ---
+    // ... (keep removed or commented out) ...
+    // --- END DIAGNOSTIC LOGGING ---
+
+    // --- Step 5: Process Combined Data ---
+    console.log(
+        "[MewContacts] Processing combined layer data to build contact info map..."
+    );
+    for (const contactNodeId of childNodeIds) {
+        const contactNode = combinedLayerData.data.nodesById[contactNodeId];
+        if (!contactNode) {
+            console.warn(
+                `[MewContacts] Missing node data for child ID ${contactNodeId}`
+            );
+            continue;
+        }
+
+        const contactName = getNodeTextContent(contactNode);
+        const properties = new Map<
+            string,
+            { propertyNodeId: string; value: string | null }
+        >();
+        let appleIdentifier: string | null = null;
+
+        // Find all relations originating FROM this contact node
+        const relations = Object.values(
+            combinedLayerData.data.relationsById
+        ).filter(
+            (rel): rel is Relation =>
+                rel !== null &&
+                typeof rel === "object" &&
+                (rel as Relation).fromId === contactNodeId
+        );
+
+        // Iterate through relations to find properties (like appleContactId, email_home, phone_mobile)
+        for (const relation of relations) {
+            // Find the label of this relation
+            const typeRelationId = relation.canonicalRelationId;
+            let relationLabel: string | null = null;
+            if (typeRelationId) {
+                // Use combined data
+                const typeRelation =
+                    combinedLayerData.data.relationsById[typeRelationId];
+                if (
+                    typeRelation &&
+                    typeRelation.relationTypeId === "__type__"
+                ) {
+                    const labelNodeId = typeRelation.toId;
+                    // Use combined data
+                    const labelNode =
+                        combinedLayerData.data.nodesById[labelNodeId];
+                    relationLabel = getNodeTextContent(labelNode);
+                }
+            }
+
+            if (!relationLabel) {
+                // console.warn(`[MewContacts] Could not find label for relation ${relation.id} from node ${contactNodeId}`);
+                continue; // Skip relations without a clear label
+            }
+
+            // Get the node the relation points TO (the property value node)
+            const propertyNodeId = relation.toId;
+            // Use combined data
+            const propertyNode =
+                combinedLayerData.data.nodesById[propertyNodeId];
+            const propertyValue = getNodeTextContent(propertyNode);
+
+            // Store the property info
+            properties.set(relationLabel, {
+                propertyNodeId,
+                value: propertyValue,
+            });
+
+            // Specifically capture the appleIdentifier
+            if (relationLabel === "appleContactId") {
+                appleIdentifier = propertyValue;
+            }
+        }
+
+        // Only add to map if we found the essential appleIdentifier
+        if (appleIdentifier) {
+            existingContactsMap.set(appleIdentifier, {
+                mewId: contactNodeId,
+                name: contactName,
+                properties: properties,
+            });
+        } else {
+            console.warn(
+                `[MewContacts] Could not find appleContactId for Mew node ${contactNodeId}. Skipping map entry.`
+            );
+        }
+    }
+
+    console.log(
+        `[MewContacts] Finished building contact info map with ${existingContactsMap.size} entries.`
+    );
+    return existingContactsMap;
 }
 
 /**
  * Syncs a single Apple Contact to Mew.
- * Creates or updates the contact node and its properties under the "My Contacts" folder.
- * @param contactData The Apple Contact data.
- * @param contactsFolderId The Node ID of the "My Contacts" folder.
- * @param existingMewContactsMap Map of existing Apple identifiers to Mew Node IDs in the folder.
+ * Creates or updates the contact node and its properties under the specified folder.
+ * This function is intended to be called sequentially for contacts that need updating.
+ * It compares the appleData with the existingInfo and generates a list of
+ * Mew API operations (add/update/delete) needed to sync the state.
+ * @param appleData The Apple Contact data from the source (e.g., macOS Contacts).
+ * @param existingInfo Pre-fetched information about the contact in Mew, including its ID, name, and properties.
+ * @returns {Promise<any[]>} A promise that resolves to an array of Mew API operation objects.
  */
 export async function syncContactToMew(
-    contactData: AppleContact,
-    contactsFolderId: string,
-    existingMewContactsMap: Map<string, string>
-): Promise<void> {
+    appleData: AppleContact,
+    existingInfo: ExistingContactInfo
+): Promise<any[]> {
+    // Return array of operations
     const contactDisplayName =
-        `${contactData.givenName || ""} ${
-            contactData.familyName || ""
-        }`.trim() ||
-        contactData.organizationName ||
+        `${appleData.givenName || ""} ${appleData.familyName || ""}`.trim() ||
+        appleData.organizationName ||
         "Unnamed Contact";
     console.log(
-        `[MewContacts] Syncing contact: ${contactDisplayName} (Apple ID: ${contactData.identifier})`
+        `[MewContacts] Generating operations for: ${contactDisplayName} (Apple ID: ${appleData.identifier}, Mew ID: ${existingInfo.mewId})`
     );
 
+    const mewContactId = existingInfo.mewId;
     const authorId = await getUserId(); // Get authorId once
+    const operations: any[] = []; // Array to collect operations
+    const timestamp = Date.now(); // Consistent timestamp for operations in this sync cycle
 
     try {
-        // --- Optimization: Check existing map first ---
-        let existingMewNodeId: string | undefined = existingMewContactsMap.get(
-            contactData.identifier
-        );
-        let contactNode: GraphNode | null = null; // Keep this for potential update logic needing the node object
-        let contactNodeId: string | null = null; // Declare contactNodeId here for broader scope
-
-        if (existingMewNodeId) {
+        // 1. Check/Update Name
+        const currentName = existingInfo.name;
+        if (currentName !== contactDisplayName) {
             console.log(
-                `[MewContacts] Contact found in existing map: Apple ID ${contactData.identifier} -> Mew ID ${existingMewNodeId}`
+                `[MewContacts]  - Name requires update: \'${currentName}\' -> \'${contactDisplayName}\'`
             );
-            // If we need the full node object for updates later, we might need a fetch here,
-            // but for now, we only need the ID for the update check.
-            contactNodeId = existingMewNodeId; // Assign the ID found in the map
-            // TODO: If update logic needs the full node, fetch it: contactNode = await mewApi.getNode(existingMewNodeId);
-        } else {
-            // If not in the map, it needs to be created.
-            // We don't need to call findContactNodeByIdentifier anymore.
-            console.log(
-                `[MewContacts] Contact Apple ID ${contactData.identifier} not found in existing map.`
+            // Generate update operation for the main contact node name
+            const updateOp = await mewApi._generateUpdateNodeContentOperation(
+                mewContactId,
+                contactDisplayName,
+                timestamp
             );
-            // contactNodeId remains null
-        }
-        // --- End Optimization Check ---
-
-        // Original logic adjusted:
-
-        // If Mew node ID wasn't found in the map, create the node
-        if (!contactNodeId) {
-            // const creationReason = isNewFolder ? "(in new folder)" : "(not found)"; // Old reason
-            const creationReason =
-                existingMewNodeId === undefined
-                    ? "(not in map)"
-                    : "(logic error?)";
-            console.log(
-                `[MewContacts] Creating new node for contact ${creationReason}: ${contactDisplayName}`
-            );
-            const response = await mewApi.addNode({
-                content: { type: "text", text: contactDisplayName },
-                parentNodeId: contactsFolderId,
-                authorId: authorId,
-            });
-            contactNodeId = response.newNodeId;
-            console.log(`[MewContacts] Created contact node: ${contactNodeId}`);
-
-            // Immediately add the identifier node using addOrUpdatePropertyNode
-            // Non-null assertion ok here as we just created it
-            await addOrUpdatePropertyNode({
-                parentNodeId: contactNodeId!,
-                relationLabel: "appleContactId", // Use specific, consistent label
-                value: contactData.identifier,
-                authorId: authorId,
-            });
-            console.log(
-                `[MewContacts] Added appleContactId node for ${contactNodeId}`
-            );
-            // Note: Properties will be added/updated in the common section below
-        } else {
-            // If Mew node ID *was* found in the map, update its display name if changed.
-            console.log(
-                `[MewContacts] Checking for updates for existing contact node: ${contactNodeId}`
-            );
-
-            // !! IMPORTANT !! We currently don't have the full 'contactNode' object
-            // because we skipped findContactNodeByIdentifier.
-            // To check/update the name, we either need to:
-            //   a) Fetch the node content here: const existingNodeData = await mewApi.getNode(contactNodeId); const currentName = getNodeTextContent(existingNodeData.node);
-            //   b) Include node names in the initial batch fetch (more complex map structure needed)
-            //   c) Assume the name doesn't need checking/updating if only syncing properties (simplest for now, but potentially incorrect)
-
-            // For now, let's proceed without the name check/update to keep the optimization focused.
-            // We will still update properties below.
-            console.warn(
-                `[MewContacts] Skipping name update check for existing contact ${contactNodeId} due to optimization.`
-            );
-
-            /* // Original name update logic (requires full node object):
-            const currentName = getNodeTextContent(contactNode!); // Requires contactNode fetched earlier
-            if (currentName !== contactDisplayName) {
-                console.log(
-                    `[MewContacts] Updating contact node ${contactNodeId} display name from '${currentName}' to '${contactDisplayName}'`
-                );
-                await mewApi.updateNode(contactNodeId, {
-                    content: createNodeContent({
-                        type: "text",
-                        text: contactDisplayName,
-                    }),
-                });
-            }
-            */
+            if (updateOp) operations.push(updateOp);
         }
 
-        // --- Common Section for Property Updates (Runs for both Create and Update) ---
-
-        // Ensure we have a contactNodeId to proceed (should always be true here unless creation failed)
-        if (!contactNodeId) {
-            console.error(
-                `[MewContacts] Failed to obtain a contactNodeId for Apple contact ${contactData.identifier}. Skipping property updates.`
-            );
-            return; // Exit sync for this contact if ID is missing
-        }
-
-        // 4. Add/Update property nodes.
-        console.log(
-            `[MewContacts] Updating properties for node: ${contactNodeId}`
-        );
-
-        // Define which properties to sync and their base labels
-        // TODO: Add more properties like address, notes, birthday
+        // 2. Check/Update Properties
+        // console.log(`[MewContacts]  - Checking properties...`);
         const propertiesToSync = [
             { key: "phoneNumbers", baseLabel: "phone", array: true },
             { key: "emailAddresses", baseLabel: "email", array: true },
@@ -376,256 +472,210 @@ export async function syncContactToMew(
                 baseLabel: "organization",
                 array: false,
             },
+            { key: "note", baseLabel: "note", array: false },
         ];
+        const appleValuesProcessed = new Set<string>(); // Track which specific apple values (e.g., phone number string) have been handled
+
+        // Create a mutable copy of existing properties to track handled/deleted ones
+        const mewProperties = new Map(existingInfo.properties.entries());
 
         for (const propInfo of propertiesToSync) {
-            const data = contactData[propInfo.key as keyof AppleContact];
+            const applePropData = appleData[propInfo.key as keyof AppleContact];
 
-            if (propInfo.array) {
+            if (propInfo.array && Array.isArray(applePropData)) {
                 // Handle arrays like phoneNumbers, emailAddresses
-                const items = (data || []) as {
-                    label?: string;
+                const items = applePropData as {
+                    label?: string | null;
                     value: string;
-                }[]; // Default to empty array
+                }[];
                 for (const item of items) {
-                    if (item.value) {
-                        // Ensure there's a value to sync
-                        const sanitizedLabel = item.label
-                            ? item.label
-                                  .replace(/[^a-zA-Z0-9]/g, "_")
-                                  .toLowerCase()
-                            : "";
-                        const relationLabel = sanitizedLabel
-                            ? `${propInfo.baseLabel}_${sanitizedLabel}`
-                            : propInfo.baseLabel;
-                        await addOrUpdatePropertyNode({
-                            parentNodeId: contactNodeId,
-                            relationLabel: relationLabel,
-                            value: item.value,
-                            authorId: authorId,
-                        });
+                    if (!item.value) continue;
+                    appleValuesProcessed.add(item.value); // Mark this value as present in source
+
+                    const sanitizedLabel = item.label
+                        ? item.label.replace(/[^a-zA-Z0-9]/g, "_").toLowerCase()
+                        : "";
+                    const relationLabel = sanitizedLabel
+                        ? `${propInfo.baseLabel}_${sanitizedLabel}`
+                        : propInfo.baseLabel;
+
+                    const existingProp = mewProperties.get(relationLabel);
+
+                    if (existingProp) {
+                        // Property with this label exists in Mew
+
+                        // --- Debug & Normalize Comparison ---
+                        let appleItemValue = item.value;
+                        let existingMewValue = existingProp.value;
+                        let needsUpdate = false;
+
+                        if (propInfo.baseLabel === "email") {
+                            // Specific handling for email
+                            appleItemValue =
+                                appleItemValue?.trim().toLowerCase() || "";
+                            existingMewValue =
+                                existingMewValue?.trim().toLowerCase() || null; // Keep null distinct from empty
+                            // Update only if non-null apple value differs from mew value, or if apple is empty but mew wasn't null
+                            needsUpdate =
+                                (appleItemValue &&
+                                    appleItemValue !== existingMewValue) ||
+                                (!appleItemValue && existingMewValue !== null);
+                        } else {
+                            // Generic comparison for other types
+                            needsUpdate = existingMewValue !== appleItemValue;
+                        }
+                        // Log the comparison details if an update seems needed
+                        if (needsUpdate) {
+                            console.log(
+                                `[DEBUG] Comparing ${relationLabel}: Mew='${
+                                    existingProp.value
+                                }'(${typeof existingProp.value}) vs Apple='${
+                                    item.value
+                                }'(${typeof item.value}). Normalized requires update: ${needsUpdate}`
+                            );
+                        }
+                        // --- End Debug & Normalize ---
+
+                        if (needsUpdate) {
+                            // Use the needsUpdate flag
+                            // Value mismatch - Update needed
+                            console.log(
+                                `[MewContacts]  -- UPDATE Property ${relationLabel} (Node ${existingProp.propertyNodeId}): \'${existingProp.value}\' -> \'${item.value}\'`
+                            );
+                            const updateOp =
+                                await mewApi._generateUpdateNodeContentOperation(
+                                    existingProp.propertyNodeId,
+                                    item.value,
+                                    timestamp
+                                );
+                            if (updateOp) operations.push(updateOp);
+                        }
+                        // Mark as handled by removing from the temp map
+                        mewProperties.delete(relationLabel);
+                    } else {
+                        // Property with this label does NOT exist in Mew - Add needed
+                        console.log(
+                            `[MewContacts]  -- ADD Property ${relationLabel}: \'${item.value}\'`
+                        );
+                        // Generate ADD operations using the helper
+                        const addOps = mewApi.generatePropertyOperations(
+                            mewContactId,
+                            relationLabel,
+                            item.value,
+                            authorId,
+                            timestamp
+                        );
+                        operations.push(...addOps);
                     }
                 }
-                // TODO: Handle deletion of properties that are no longer present in the source data
-            } else if (typeof data === "string" && data) {
-                // Handle simple string properties like organizationName
-                await addOrUpdatePropertyNode({
-                    parentNodeId: contactNodeId,
-                    relationLabel: propInfo.baseLabel,
-                    value: data,
-                    authorId: authorId,
-                });
-                // TODO: Handle deletion if the string property is now empty/null in source
-            }
-            // TODO: Handle deletion if the property key itself is absent from contactData
-        }
+            } else if (
+                !propInfo.array &&
+                typeof applePropData === "string" &&
+                applePropData
+            ) {
+                // Handle simple string properties (org, note)
+                const appleValue = applePropData;
+                const relationLabel = propInfo.baseLabel;
+                appleValuesProcessed.add(appleValue); // Mark this value as present in source
 
-        console.log(
-            `[MewContacts] Finished syncing contact: ${contactDisplayName}`
-        );
-    } catch (error) {
-        console.error(
-            `[MewContacts] Failed to sync contact ${contactDisplayName} (ID: ${contactData.identifier}):`,
-            error
-        );
-        // Optionally re-throw or handle error appropriately
-    }
-}
+                const existingProp = mewProperties.get(relationLabel);
+                if (existingProp) {
+                    // Property exists
 
-/**
- * Helper function to add or update a property node (like phone, email) for a parent (contact) node.
- * Searches for an existing node with the same relationLabel under the parent.
- * If found and value differs, updates it. If not found, creates it.
- * @param params Information about the property node
- */
-async function addOrUpdatePropertyNode(params: {
-    parentNodeId: string; // Contact Node ID
-    relationLabel: string;
-    value: string;
-    authorId: string;
-}): Promise<void> {
-    const { parentNodeId, relationLabel, value, authorId } = params;
-
-    // console.log(`[MewContacts] Ensuring property '${relationLabel}' with value '${value}' for node ${parentNodeId}`); // Verbose
-
-    try {
-        // 1. Get children of parentNodeId and their relations/labels
-        // Fetching layer data here again is inefficient. Ideally, fetch once in syncContactToMew
-        // and pass relevant data down. For now, keeping it simple.
-        const layerData = await mewApi.getLayerData([parentNodeId]);
-        const relations = Object.values(layerData.data.relationsById).filter(
-            (rel): rel is Relation =>
-                rel !== null &&
-                typeof rel === "object" &&
-                "fromId" in rel &&
-                rel.fromId === parentNodeId
-        );
-
-        let existingPropertyNode: GraphNode | null = null;
-
-        // 2. Search for an existing node with the same relationLabel.
-        for (const relation of relations) {
-            const typeRelationId = relation.canonicalRelationId;
-            if (typeRelationId) {
-                // Again, potential issue: label node might not be in layerData if only parentNodeId was requested
-                const typeRelation =
-                    layerData.data.relationsById[typeRelationId];
-                if (
-                    typeRelation &&
-                    typeRelation.relationTypeId === "__type__"
-                ) {
-                    const labelNodeId = typeRelation.toId;
-                    const labelNode = layerData.data.nodesById[labelNodeId];
-                    const labelText = getNodeTextContent(labelNode);
-
-                    if (labelText === relationLabel) {
-                        const propertyNodeId = relation.toId;
-                        existingPropertyNode =
-                            layerData.data.nodesById[propertyNodeId];
-                        // console.log(`[MewContacts] Found existing property node ${existingPropertyNode?.id} for label '${relationLabel}'`); // Verbose
-                        break;
+                    // --- Debug Comparison ---
+                    let needsUpdate = existingProp.value !== appleValue;
+                    if (needsUpdate) {
+                        console.log(
+                            `[DEBUG] Comparing ${relationLabel}: Mew='${
+                                existingProp.value
+                            }'(${typeof existingProp.value}) vs Apple='${appleValue}'(${typeof appleValue}). Requires update: ${needsUpdate}`
+                        );
                     }
+                    // --- End Debug ---
+
+                    if (needsUpdate) {
+                        // Value mismatch - Update needed
+                        console.log(
+                            `[MewContacts]  -- UPDATE Property ${relationLabel} (Node ${existingProp.propertyNodeId}): \'${existingProp.value}\' -> \'${appleValue}\'`
+                        );
+                        const updateOp =
+                            await mewApi._generateUpdateNodeContentOperation(
+                                existingProp.propertyNodeId,
+                                appleValue,
+                                timestamp
+                            );
+                        if (updateOp) operations.push(updateOp);
+                    }
+                    // Mark as handled by removing from the temp map
+                    mewProperties.delete(relationLabel);
+                } else {
+                    // Property does not exist - Add needed
+                    console.log(
+                        `[MewContacts]  -- ADD Property ${relationLabel}: \'${appleValue}\'`
+                    );
+                    // Generate ADD operations using the helper
+                    const addOps = mewApi.generatePropertyOperations(
+                        mewContactId,
+                        relationLabel,
+                        appleValue,
+                        authorId,
+                        timestamp
+                    );
+                    operations.push(...addOps);
                 }
             }
         }
 
-        // 3. If found, compare value and update if needed.
-        if (existingPropertyNode) {
-            const existingValue = getNodeTextContent(existingPropertyNode);
-            if (existingValue !== value) {
-                console.log(
-                    `[MewContacts] Updating property node ${existingPropertyNode.id} ('${relationLabel}'). Old: '${existingValue}', New: '${value}'`
-                );
-                await mewApi.updateNode(existingPropertyNode.id, {
-                    content: createNodeContent({ type: "text", text: value }),
-                });
-            }
-            // else { // Verbose
-            // console.log(`[MewContacts] Property node ${existingPropertyNode.id} ('${relationLabel}') already has correct value.`);
-            // }
-        }
-        // 4. If not found, create a new node.
-        else {
+        // 3. Handle Deletion of properties remaining in the map
+        if (mewProperties.size > 0) {
             console.log(
-                `[MewContacts] Creating new property node ('${relationLabel}') with value '${value}'`
+                `[MewContacts]  - Checking for ${mewProperties.size} properties to delete...`
             );
-            await mewApi.addNode({
-                content: { type: "text", text: value },
-                parentNodeId: parentNodeId,
-                relationLabel: relationLabel,
-                authorId: authorId,
-            });
+            for (const [
+                labelToDelete,
+                propInfoToDelete,
+            ] of mewProperties.entries()) {
+                // Crucially, DON'T delete the appleContactId property!
+                if (labelToDelete === "appleContactId") {
+                    continue;
+                }
+                console.log(
+                    `[MewContacts]  -- DELETE Property ${labelToDelete} (Node ${propInfoToDelete.propertyNodeId}): Value \'${propInfoToDelete.value}\'`
+                );
+                // Generate DELETE operation
+                const deleteOp = mewApi._generateDeleteNodeOperation(
+                    propInfoToDelete.propertyNodeId
+                );
+                operations.push(deleteOp);
+                // TODO: Consider deleting label node + relations if they become orphaned?
+            }
         }
     } catch (error) {
         console.error(
-            `[MewContacts] Failed to add/update property node '${relationLabel}' for parent ${parentNodeId}:`,
+            `[MewContacts] Failed generating operations for contact ${contactDisplayName} (Apple ID: ${appleData.identifier}, Mew ID: ${existingInfo.mewId}):`,
             error
         );
-        throw error; // Rethrow to signal failure up the chain
+        // Return empty array or re-throw? Returning empty means this contact's updates are skipped.
+        return [];
     }
+
+    // Return the collected operations for this contact
+    if (operations.length > 0) {
+        console.log(
+            `[MewContacts] Generated ${operations.length} operations for ${contactDisplayName}`
+        );
+    }
+    return operations;
 }
 
 /**
- * Fetches all child nodes of a given folder and builds a map of
- * Apple Contact Identifier -> Mew Node ID for efficient lookup.
- * @param contactsFolderId The Node ID of the "My Contacts" folder in Mew.
- * @returns A Map where keys are Apple Contact Identifiers and values are Mew Node IDs.
+ * Main processing function for the contact sync script.
+ * Orchestrates fetching contacts from the Python script, determining which contacts
+ * exist in Mew, batch-creating new contacts, and sequentially updating existing ones.
+ * @param userRootUrl The root URL for the user's Mew space (passed as CLI argument).
+ * @param contactsJsonString Raw JSON string fetched from the Python script,
+ *                         containing an array of AppleContact objects.
  */
-async function fetchExistingContactIdentifiers(
-    contactsFolderId: string
-): Promise<Map<string, string>> {
-    const existingContactsMap = new Map<string, string>();
-    console.log(
-        `[MewContacts] Getting child nodes for folder: ${contactsFolderId}`
-    );
-
-    // 1. Get all child nodes (potential contact nodes) of contactsFolderId.
-    const { childNodes: potentialContactNodes } = await mewApi.getChildNodes({
-        parentNodeId: contactsFolderId,
-    });
-
-    if (!potentialContactNodes || potentialContactNodes.length === 0) {
-        console.log("[MewContacts] No existing child nodes found in folder.");
-        return existingContactsMap; // Return empty map
-    }
-
-    const childNodeIds = potentialContactNodes
-        .map((node) => node?.id)
-        .filter((id): id is string => !!id);
-
-    if (childNodeIds.length === 0) {
-        console.log(
-            "[MewContacts] Child nodes found but missing IDs. Returning empty map."
-        );
-        return existingContactsMap;
-    }
-
-    console.log(
-        `[MewContacts] Found ${childNodeIds.length} child nodes. Fetching layer data...`
-    );
-
-    // 2. Fetch layer data for all children at once.
-    // This should hopefully include relations and potentially the identifier nodes.
-    const layerData = await mewApi.getLayerData(childNodeIds);
-
-    // 3. Process the layer data to build the map.
-    console.log("[MewContacts] Processing layer data to find identifiers...");
-    for (const contactNodeId of childNodeIds) {
-        const relations = Object.values(layerData.data.relationsById).filter(
-            (rel): rel is Relation =>
-                rel !== null &&
-                typeof rel === "object" &&
-                "fromId" in rel &&
-                rel.fromId === contactNodeId
-        );
-
-        // Find the relation specifically labeled "appleContactId"
-        let appleIdentifier: string | null = null;
-        for (const relation of relations) {
-            const typeRelationId = relation.canonicalRelationId;
-            if (typeRelationId) {
-                const typeRelation =
-                    layerData.data.relationsById[typeRelationId];
-                if (
-                    typeRelation &&
-                    typeRelation.relationTypeId === "__type__"
-                ) {
-                    const labelNodeId = typeRelation.toId;
-                    const labelNode = layerData.data.nodesById[labelNodeId];
-                    const labelText = getNodeTextContent(labelNode);
-
-                    if (labelText === "appleContactId") {
-                        // Found the relation. Now get the identifier node's content.
-                        const idNodeId = relation.toId;
-                        const idNode = layerData.data.nodesById[idNodeId];
-                        appleIdentifier = getNodeTextContent(idNode);
-                        break; // Found the identifier, no need to check other relations for this node
-                    }
-                }
-            }
-        }
-
-        if (appleIdentifier) {
-            // console.log(`[MewContacts] Mapping AppleID: ${appleIdentifier} -> MewID: ${contactNodeId}`); // Verbose
-            existingContactsMap.set(appleIdentifier, contactNodeId);
-        } else {
-            // This might happen if a node in the folder is not a contact managed by this script
-            // or if the appleContactId relation is missing.
-            console.warn(
-                `[MewContacts] Could not find appleContactId for Mew node ${contactNodeId} in folder ${contactsFolderId}`
-            );
-        }
-    }
-
-    console.log(
-        `[MewContacts] Finished building map with ${existingContactsMap.size} identifiers.`
-    );
-    return existingContactsMap;
-}
-
-const BATCH_CHUNK_SIZE = 50; // Number of contacts to create per batch API call
-
-// Main processing function
 export async function processContacts(
     userRootUrl: string,
     contactsJsonString: string
@@ -661,14 +711,16 @@ export async function processContacts(
         );
 
         // --- Optimization: Fetch existing contact identifiers in batch ---
-        let existingMewContactsMap = new Map<string, string>(); // Map<appleIdentifier, mewNodeId>
+        // If the contacts folder already exists, fetch all children and their
+        // corresponding Apple identifiers into a map for efficient lookup.
+        let existingMewContactsMap = new Map<string, ExistingContactInfo>(); // Updated type
 
         if (!isNewFolder) {
             console.log(
                 `[MewContacts] Fetching existing contacts from folder ${contactsFolderId}...`
             );
             try {
-                existingMewContactsMap = await fetchExistingContactIdentifiers(
+                existingMewContactsMap = await fetchExistingContactInfo(
                     contactsFolderId
                 );
             } catch (error) {
@@ -689,12 +741,11 @@ export async function processContacts(
         }
         // --- End Optimization ---
 
-        const contactsToCreate: { identifier: string; displayName: string }[] =
-            [];
+        const contactsToCreate: AppleContact[] = []; // Use AppleContact type
         const contactsToUpdate: { appleData: AppleContact; mewId: string }[] =
             [];
 
-        // Separate contacts into create/update lists
+        // Separate contacts into create/update lists based on the map
         for (const contact of contactsData) {
             // Basic validation
             if (
@@ -709,27 +760,18 @@ export async function processContacts(
                 continue;
             }
 
-            const existingMewId = existingMewContactsMap.get(
+            const existingContactInfo = existingMewContactsMap.get(
                 contact.identifier
             );
-            if (existingMewId) {
+            if (existingContactInfo) {
                 // Exists in Mew, needs update check
                 contactsToUpdate.push({
                     appleData: contact,
-                    mewId: existingMewId,
-                });
+                    mewId: existingContactInfo.mewId,
+                }); // Pass mewId
             } else {
                 // Does not exist in Mew, needs creation
-                const contactDisplayName =
-                    `${contact.givenName || ""} ${
-                        contact.familyName || ""
-                    }`.trim() ||
-                    contact.organizationName ||
-                    "Unnamed Contact";
-                contactsToCreate.push({
-                    identifier: contact.identifier,
-                    displayName: contactDisplayName,
-                });
+                contactsToCreate.push(contact); // Push the full contact object
             }
         }
 
@@ -738,6 +780,7 @@ export async function processContacts(
         );
 
         // --- Chunked Batch Create ---
+        // Create new contacts in batches to improve performance and avoid server timeouts.
         if (contactsToCreate.length > 0) {
             console.log(
                 `[MewContacts] Starting batch creation for ${contactsToCreate.length} contacts in chunks of ${BATCH_CHUNK_SIZE}...`
@@ -792,20 +835,72 @@ export async function processContacts(
         }
         // --- End Chunked Batch Create ---
 
-        // --- Sequential Update ---
+        // --- Generate Update Operations ---
         console.log(
-            `[MewContacts] Starting sequential check/update for ${contactsToUpdate.length} existing contacts...`
+            `[MewContacts] Generating update/delete operations for ${contactsToUpdate.length} existing contacts...`
         );
+        let allUpdateOps: any[] = [];
         for (const updateInfo of contactsToUpdate) {
-            // We need to call syncContactToMew, but it expects the map.
-            // We can pass the original map, or an empty one if we know it exists.
-            // Passing the original map is safer as syncContactToMew uses it.
-            await syncContactToMew(
-                updateInfo.appleData,
-                contactsFolderId,
-                existingMewContactsMap
+            const existingInfo = existingMewContactsMap.get(
+                updateInfo.appleData.identifier
             );
+            if (!existingInfo) {
+                console.warn(
+                    `[MewContacts] Could not find pre-fetched info for existing contact ${updateInfo.mewId}. Skipping update.`
+                );
+                continue;
+            }
+            // Get operations needed for this specific contact
+            const contactOps = await syncContactToMew(
+                updateInfo.appleData,
+                existingInfo
+            );
+            allUpdateOps.push(...contactOps); // Aggregate operations
         }
+        console.log(
+            `[MewContacts] Generated a total of ${allUpdateOps.length} update/delete operations.`
+        );
+
+        // --- Send Update Operations in Chunks ---
+        if (allUpdateOps.length > 0) {
+            console.log(
+                `[MewContacts] Sending ${allUpdateOps.length} update/delete operations in chunks of ${BATCH_CHUNK_SIZE} operations...`
+                // Note: Chunk size here is based on *operations*, not contacts
+            );
+            for (let i = 0; i < allUpdateOps.length; i += BATCH_CHUNK_SIZE) {
+                const chunk = allUpdateOps.slice(i, i + BATCH_CHUNK_SIZE);
+                console.log(
+                    `[MewContacts] Sending update chunk ${
+                        i / BATCH_CHUNK_SIZE + 1
+                    } / ${Math.ceil(allUpdateOps.length / BATCH_CHUNK_SIZE)} (${
+                        chunk.length
+                    } operations)`
+                );
+                try {
+                    await mewApi.sendBatchOperations(chunk); // Send the chunk of operations
+                    console.log(
+                        `[MewContacts] Update chunk ${
+                            i / BATCH_CHUNK_SIZE + 1
+                        } successful.`
+                    );
+                    // Optional delay?
+                    // await new Promise(resolve => setTimeout(resolve, 100));
+                } catch (error) {
+                    console.error(
+                        `[MewContacts] Batch update failed for chunk starting at index ${i}:`,
+                        error
+                    );
+                    // Decide how to proceed
+                    throw new Error(
+                        `Batch update failed on chunk ${
+                            i / BATCH_CHUNK_SIZE + 1
+                        }, stopping sync.`
+                    );
+                }
+            }
+            console.log(`[MewContacts] Batch update phase completed.`);
+        }
+        // --- End Send Update Operations ---
 
         console.log("[MewContacts] Sync finished successfully.");
     } catch (error) {
@@ -820,6 +915,8 @@ const currentFilePath = fileURLToPath(import.meta.url);
 const scriptPath = resolve(process.argv[1]);
 
 // Check if the current file path matches the executed script path
+// This ensures the main logic only runs when the script is executed directly,
+// not when imported as a module.
 if (currentFilePath === scriptPath) {
     // --- Main script execution logic starts here ---
     const args = process.argv.slice(2);
@@ -835,7 +932,7 @@ if (currentFilePath === scriptPath) {
         // Execute the Python script and capture stdout
         const pythonOutput = execSync("python3 get_contacts_json.py", {
             encoding: "utf8",
-            // Increase maxBuffer if you have a very large number of contacts
+            // Increase maxBuffer if needed for very large contact lists, though stderr logging is preferred.
             // maxBuffer: 1024 * 1024 * 10, // Example: 10MB
         });
 

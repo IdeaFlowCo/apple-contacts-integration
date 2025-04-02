@@ -25,12 +25,17 @@ export interface ConversationNode {
     createdAt: string;
 }
 
+/**
+ * Represents the types of content a Mew node can primarily consist of.
+ * Used to structure the `content` array for API calls.
+ */
 export enum NodeContentType {
     Text = "text",
     Replacement = "replacement",
     Mention = "mention",
 }
 
+/** Represents data needed for a replacement-type node. */
 export interface ReplacementNodeData {
     referenceNodeId: string;
     referenceCanonicalRelationId: string;
@@ -42,6 +47,7 @@ export interface MentionData {
     mentionNodeId: string;
 }
 
+/** Union type representing the simplified input for node content creation. */
 export type NodeContent =
     | { type: NodeContentType.Text; text: string }
     | {
@@ -50,6 +56,12 @@ export type NodeContent =
       }
     | { type: NodeContentType.Mention; mentionData: MentionData };
 
+/**
+ * Utility function to format various input content types into the
+ * structured array format expected by the Mew API's `node.content` field.
+ * @param content The input content (string, object, or already formatted array).
+ * @returns {object[]} The formatted content array.
+ */
 export function createNodeContent(content: any) {
     // If content is already in the correct format, return it
     if (Array.isArray(content)) {
@@ -88,12 +100,17 @@ export function createNodeContent(content: any) {
     return [{ type: "text", value: "", styles: 0 }];
 }
 
+/**
+ * Provides methods for interacting with the Mew API.
+ * Handles authentication, node creation/updates, relation management, and data fetching.
+ */
 export class MewAPI {
     private baseUrl: string;
     private baseNodeUrl: string;
     private token: string;
     private currentUserId: string;
 
+    /** Initializes the API service with base URLs and empty token/userId. */
     constructor() {
         // Use the base URL from our AUTH_CONFIG
         this.baseUrl = AUTH_CONFIG.baseUrl;
@@ -102,18 +119,34 @@ export class MewAPI {
         this.currentUserId = ""; // Will be set from user's root node URL
     }
 
+    /**
+     * Sets the User ID for the current session.
+     * This ID is used as the default authorId for operations.
+     * @param userId The Mew User ID, typically parsed from the user root URL.
+     */
     public setCurrentUserId(userId: string): void {
         this.currentUserId = userId;
     }
 
+    /**
+     * Gets the currently set User ID.
+     * @returns An object containing the current user ID, or empty if not set.
+     */
     public getCurrentUser(): { id: string } {
         return { id: this.currentUserId };
     }
 
+    /** Generates a UUID v4. */
     private uuid(): string {
         return crypto.randomUUID();
     }
 
+    /**
+     * Retrieves or refreshes the Auth0 access token using client credentials.
+     * Stores the token internally for subsequent API calls.
+     * @returns {Promise<string>} The fetched access token.
+     * @throws {Error} If authentication fails.
+     */
     async getAccessToken(): Promise<string> {
         // Retrieve an access token using Auth0 credentials.
         try {
@@ -146,6 +179,13 @@ export class MewAPI {
         return this.token;
     }
 
+    /**
+     * Updates an existing Mew node with the provided partial data.
+     * Fetches the existing node to construct the `oldProps` for the transaction.
+     * @param nodeId The ID of the node to update.
+     * @param updates An object containing the properties to update.
+     * @throws {Error} If the node is not found or the update API call fails.
+     */
     async updateNode(
         nodeId: string,
         updates: Partial<GraphNode>
@@ -213,6 +253,12 @@ export class MewAPI {
         console.log(`Node ${nodeId} updated successfully.`);
     }
 
+    /**
+     * Deletes a Mew node.
+     * Note: Currently only deletes the node itself. Associated relations might need explicit deletion.
+     * @param nodeId The ID of the node to delete.
+     * @throws {Error} If the deletion API call fails.
+     */
     async deleteNode(nodeId: string): Promise<void> {
         const token = await this.getAccessToken();
         const transactionId = this.uuid();
@@ -269,6 +315,14 @@ export class MewAPI {
         console.log(`Node ${nodeId} deleted successfully.`);
     }
 
+    /**
+     * Adds a single Mew node, optionally linking it as a child of a parent
+     * and adding a type relation based on a label.
+     * Constructs and executes a single transaction for all related operations.
+     * @param input Object containing node details (content, parentId, label, etc.).
+     * @returns {Promise<object>} An object containing IDs of the created node and relations.
+     * @throws {Error} If the API call fails.
+     */
     async addNode(input: {
         content: any;
         parentNodeId?: string;
@@ -520,6 +574,12 @@ export class MewAPI {
         };
     }
 
+    /**
+     * Fetches the base synchronization data for the user.
+     * (Currently unused in the contacts sync script).
+     * @returns {Promise<any>} The sync data payload.
+     * @throws {Error} If the API call fails.
+     */
     async syncData(): Promise<any> {
         const token = await this.getAccessToken();
         const response = await fetch(`${this.baseUrl}/sync`, {
@@ -535,6 +595,12 @@ export class MewAPI {
         return response.json();
     }
 
+    /**
+     * Fetches detailed data for a list of specified object IDs (nodes or relations).
+     * @param objectIds An array of node or relation IDs.
+     * @returns {Promise<any>} The layer data payload containing details about the requested objects and related entities.
+     * @throws {Error} If the API call fails.
+     */
     async getLayerData(objectIds: string[]): Promise<any> {
         const token = await this.getAccessToken();
         const response = await fetch(`${this.baseUrl}/layer`, {
@@ -555,8 +621,10 @@ export class MewAPI {
     }
 
     /**
-     * Finds a node with exact text match under a parent node
-     * @returns The matching node or undefined
+     * Finds the first child node under a given parent that has an exact text match.
+     * Useful for finding nodes like the "My Contacts" folder by name.
+     * @param params Object containing parentNodeId and nodeText to search for.
+     * @returns {Promise<GraphNode | undefined>} The matching GraphNode or undefined if not found.
      */
     async findNodeByText({
         parentNodeId,
@@ -600,6 +668,13 @@ export class MewAPI {
         return node;
     }
 
+    /**
+     * Retrieves the direct child nodes of a given parent node.
+     * Fetches layer data for the parent and filters relations to find children.
+     * @param params Object containing parentNodeId.
+     * @returns {Promise<{ parentNode: GraphNode; childNodes: GraphNode[] }>} An object containing the parent node data
+     *          and an array of its direct child nodes.
+     */
     async getChildNodes({
         parentNodeId,
     }: {
@@ -633,21 +708,42 @@ export class MewAPI {
         };
     }
 
+    /**
+     * Constructs the web URL for a given Mew node ID.
+     * @param nodeId The Mew Node ID.
+     * @returns {string} The full URL to view the node in the Mew web interface.
+     */
     getNodeUrl(nodeId: string): string {
-        return `${this.baseUrl}/g/all/global-root-to-users/all/users-to-user-relation-id/${nodeId}`;
+        // Note: This URL structure might be specific to the environment/user setup.
+        // It seems tailored to construct a URL based on the current user's structure.
+        // Consider if a simpler `${this.baseNodeUrl}n/${nodeId}` format might be more general.
+        // return `${this.baseNodeUrl}n/${nodeId}`; // Simpler alternative?
+
+        // Current implementation assumes a specific path structure including the user ID
+        if (!this.currentUserId) {
+            console.warn(
+                "[MewAPI] getNodeUrl called before currentUserId is set. URL might be incorrect."
+            );
+            // Fallback or throw error? For now, construct a potentially incomplete URL.
+            return `${this.baseNodeUrl}g/all/global-root-to-users/all/users-to-user-relation-id-unknown/user-root-id-unknown`;
+        }
+        // Construct the URL using the known base and the user ID pattern
+        // This assumes the user ID correctly represents the 'google-oauth2|...' part.
+        return `${this.baseNodeUrl}g/all/global-root-to-users/all/users-to-user-relation-id-${this.currentUserId}/user-root-id-${this.currentUserId}`;
+        // Original hardcoded example: return `${this.baseNodeUrl}g/all/global-root-to-users/all/users-to-user-relation-id/${nodeId}`;
+        // This original example seems incorrect as it used the target nodeId in the user path part.
     }
 
     /**
      * Adds multiple contact nodes and their appleContactId properties in a single transaction.
-     * @param contactsToAdd Array of objects containing data for contacts to add.
-     * @param parentNodeId The Node ID of the parent folder (e.g., "My Contacts").
-     * @returns A Map of Apple Identifier -> New Mew Node ID for the created contacts.
+     * Designed to efficiently create multiple contacts retrieved from an external source.
+     * @param contactsToAdd Array of objects, each containing the identifier (Apple ID) and display name for a contact.
+     * @param parentNodeId The Mew Node ID of the parent folder (e.g., "My Contacts") where contacts will be created.
+     * @returns {Promise<Map<string, string>>} A Map where keys are Apple Identifiers and values are the newly created Mew Node IDs.
+     * @throws {Error} If the batch API call fails.
      */
     async batchAddContacts(
-        contactsToAdd: {
-            identifier: string; // Apple Contact Identifier
-            displayName: string;
-        }[],
+        contactsToAdd: AppleContact[],
         parentNodeId: string
     ): Promise<Map<string, string>> {
         const token = await this.getAccessToken();
@@ -664,8 +760,13 @@ export class MewAPI {
         for (const contact of contactsToAdd) {
             const newNodeId = this.uuid();
             const parentChildRelationId = this.uuid();
-            const relationLabel = "appleContactId"; // Constant label
-            const relationLabelValue = contact.identifier; // Apple ID as value
+
+            // Reconstruct the display name assignment carefully
+            let calculatedName = `${contact.givenName || ""} ${
+                contact.familyName || ""
+            }`.trim();
+            const displayName =
+                calculatedName || contact.organizationName || "Unnamed Contact"; // Use calculatedName
 
             createdContactsMap.set(contact.identifier, newNodeId);
 
@@ -680,11 +781,11 @@ export class MewAPI {
                     updatedAt: timestamp,
                     content: createNodeContent({
                         type: NodeContentType.Text,
-                        text: contact.displayName,
+                        text: displayName,
                     }),
                     isPublic: true,
                     isNewRelatedObjectsPublic: false,
-                    canonicalRelationId: parentChildRelationId, // Link to parent relation
+                    canonicalRelationId: parentChildRelationId,
                     isChecked: null,
                 },
             });
@@ -702,12 +803,12 @@ export class MewAPI {
                     toId: newNodeId,
                     relationTypeId: "child",
                     isPublic: true,
-                    canonicalRelationId: null, // Will be updated later if label exists
+                    canonicalRelationId: null,
                 },
                 fromPos: {
                     int: timestamp,
                     frac: crypto.randomBytes(4).toString("hex"),
-                }, // Use unique frac for ordering
+                },
                 toPos: {
                     int: timestamp,
                     frac: crypto.randomBytes(4).toString("hex"),
@@ -730,163 +831,74 @@ export class MewAPI {
             });
 
             // --- 3. Add the appleContactId property node and its relations ---
-            const propertyNodeId = this.uuid();
-            const propertyTypeRelationId = this.uuid(); // Relation between parent-child and label node
-            const propertyRelationId = this.uuid(); // The actual relation storing the ID
+            // Ensure we always add the identifier property
+            const appleIdOps = this.generatePropertyOperations(
+                newNodeId,
+                "appleContactId",
+                contact.identifier,
+                authorId,
+                timestamp
+            );
+            updates.push(...appleIdOps);
 
-            // 3a. Add the node holding the Apple ID value
-            updates.push({
-                operation: "addNode",
-                node: {
-                    version: 1,
-                    id: propertyNodeId,
-                    authorId: authorId,
-                    createdAt: timestamp,
-                    updatedAt: timestamp,
-                    content: createNodeContent({
-                        type: NodeContentType.Text,
-                        text: relationLabelValue,
-                    }),
-                    isPublic: true,
-                    isNewRelatedObjectsPublic: false,
-                    canonicalRelationId: propertyRelationId, // Link to property relation
-                    isChecked: null,
+            // --- 4. Add other properties (Phone, Email, Org, Note) ---
+            const propertiesToSync = [
+                { key: "phoneNumbers", baseLabel: "phone", array: true },
+                { key: "emailAddresses", baseLabel: "email", array: true },
+                {
+                    key: "organizationName",
+                    baseLabel: "organization",
+                    array: false,
                 },
-            });
+                { key: "note", baseLabel: "note", array: false },
+            ];
 
-            // 3b. Add the relation for the property (Contact Node -> ID Value Node)
-            updates.push({
-                operation: "addRelation",
-                relation: {
-                    version: 1,
-                    id: propertyRelationId,
-                    authorId: authorId,
-                    createdAt: timestamp,
-                    updatedAt: timestamp,
-                    fromId: newNodeId, // From the main contact node
-                    toId: propertyNodeId, // To the ID value node
-                    relationTypeId: "child", // Or a more specific type if available
-                    isPublic: true,
-                    canonicalRelationId: null, // Will be updated with type relation ID
-                },
-                fromPos: {
-                    int: timestamp,
-                    frac: crypto.randomBytes(4).toString("hex"),
-                },
-                toPos: {
-                    int: timestamp,
-                    frac: crypto.randomBytes(4).toString("hex"),
-                },
-            });
-            updates.push({
-                operation: "updateRelationList",
-                relationId: propertyRelationId,
-                oldPosition: null,
-                newPosition: {
-                    int: timestamp,
-                    frac: crypto.randomBytes(4).toString("hex"),
-                },
-                authorId: authorId,
-                type: "all",
-                oldIsPublic: true,
-                newIsPublic: true,
-                nodeId: newNodeId,
-                relatedNodeId: propertyNodeId,
-            });
+            for (const propInfo of propertiesToSync) {
+                const data = contact[propInfo.key as keyof AppleContact];
 
-            // 3c. Add the label node ("appleContactId") - *Assume it might not exist, create defensively*
-            // In a real system, you might fetch/cache common labels, but creating is safer for now.
-            const labelNodeId = this.uuid();
-            updates.push({
-                operation: "addNode",
-                node: {
-                    version: 1,
-                    id: labelNodeId,
-                    authorId: authorId, // Or a system author
-                    createdAt: timestamp,
-                    updatedAt: timestamp,
-                    content: createNodeContent({
-                        type: NodeContentType.Text,
-                        text: relationLabel,
-                    }),
-                    isPublic: true,
-                    isNewRelatedObjectsPublic: false,
-                    canonicalRelationId: null,
-                    isChecked: null,
-                },
-            });
-
-            // 3d. Add the __type__ relation (Property Relation -> Label Node)
-            updates.push({
-                operation: "addRelation",
-                relation: {
-                    version: 1,
-                    id: propertyTypeRelationId,
-                    authorId: authorId,
-                    createdAt: timestamp,
-                    updatedAt: timestamp,
-                    fromId: propertyRelationId, // From the property relation
-                    toId: labelNodeId, // To the label node
-                    relationTypeId: "__type__",
-                    isPublic: true,
-                    canonicalRelationId: null,
-                },
-                fromPos: {
-                    int: timestamp,
-                    frac: crypto.randomBytes(4).toString("hex"),
-                },
-                toPos: {
-                    int: timestamp,
-                    frac: crypto.randomBytes(4).toString("hex"),
-                },
-            });
-            updates.push({
-                operation: "updateRelationList",
-                relationId: propertyTypeRelationId,
-                oldPosition: null,
-                newPosition: {
-                    int: timestamp,
-                    frac: crypto.randomBytes(4).toString("hex"),
-                },
-                authorId: authorId,
-                type: "all", // Check if this is correct for type relations
-                oldIsPublic: true,
-                newIsPublic: true,
-                nodeId: propertyRelationId, // Check this
-                relatedNodeId: labelNodeId,
-            });
-
-            // 3e. Update the property relation to point to its type relation
-            updates.push({
-                operation: "updateRelation",
-                oldProps: {
-                    // Need to reconstruct the state just added
-                    version: 1,
-                    id: propertyRelationId,
-                    authorId: authorId,
-                    createdAt: timestamp,
-                    updatedAt: timestamp,
-                    fromId: newNodeId,
-                    toId: propertyNodeId,
-                    relationTypeId: "child",
-                    isPublic: true,
-                    canonicalRelationId: null,
-                },
-                newProps: {
-                    version: 1,
-                    id: propertyRelationId,
-                    authorId: authorId,
-                    createdAt: timestamp,
-                    updatedAt: timestamp,
-                    fromId: newNodeId,
-                    toId: propertyNodeId,
-                    relationTypeId: "child",
-                    isPublic: true,
-                    canonicalRelationId: propertyTypeRelationId, // Link to the type relation
-                },
-            });
-
-            // --- End appleContactId property ---
+                if (propInfo.array && Array.isArray(data)) {
+                    // Handle arrays like phoneNumbers, emailAddresses
+                    const items = data as {
+                        label?: string | null;
+                        value: string;
+                    }[];
+                    for (const item of items) {
+                        if (item.value) {
+                            const sanitizedLabel = item.label
+                                ? item.label
+                                      .replace(/[^a-zA-Z0-9]/g, "_")
+                                      .toLowerCase()
+                                : "";
+                            const relationLabel = sanitizedLabel
+                                ? `${propInfo.baseLabel}_${sanitizedLabel}`
+                                : propInfo.baseLabel;
+                            const propOps = this.generatePropertyOperations(
+                                newNodeId,
+                                relationLabel,
+                                item.value,
+                                authorId,
+                                timestamp
+                            );
+                            updates.push(...propOps);
+                        }
+                    }
+                } else if (
+                    !propInfo.array &&
+                    typeof data === "string" &&
+                    data
+                ) {
+                    // Handle simple string properties
+                    const propOps = this.generatePropertyOperations(
+                        newNodeId,
+                        propInfo.baseLabel,
+                        data,
+                        authorId,
+                        timestamp
+                    );
+                    updates.push(...propOps);
+                }
+            }
+            // --- End Other Properties ---
         }
 
         if (updates.length === 0) {
@@ -947,8 +959,286 @@ export class MewAPI {
             throw error;
         }
     }
+
+    /**
+     * Sends a batch of pre-constructed update operations to the /sync endpoint.
+     * @param operations An array of operation objects (e.g., addNode, updateNode, deleteNode, addRelation).
+     * @param transactionId Optional transaction ID. If not provided, a new one is generated.
+     * @throws {Error} If the API call fails.
+     */
+    async sendBatchOperations(
+        operations: any[],
+        transactionId: string = this.uuid()
+    ): Promise<any> {
+        // Return the response JSON
+        if (!operations || operations.length === 0) {
+            console.log("[MewAPI] No operations provided for batch send.");
+            return Promise.resolve({}); // Nothing to do
+        }
+
+        const token = await this.getAccessToken();
+        const authorId = this.currentUserId;
+
+        console.log(
+            `[MewAPI] Sending batch transaction ${transactionId} with ${operations.length} operations...`
+        );
+        const payload = {
+            clientId: AUTH_CONFIG.auth0ClientId,
+            userId: authorId,
+            transactionId: transactionId,
+            updates: operations, // Send the provided operations array
+        };
+
+        try {
+            const txResponse = await fetch(`${this.baseUrl}/sync`, {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify(payload),
+            });
+
+            if (!txResponse.ok) {
+                const responseText = await txResponse.text();
+                let detail = responseText;
+                try {
+                    const errorJson = JSON.parse(responseText);
+                    detail = errorJson.detail || responseText;
+                } catch (e) {
+                    /* Ignore parsing error */
+                }
+                const errMsg = `Failed batch operations (TxID: ${transactionId}): Status ${txResponse.status} ${txResponse.statusText}. Detail: ${detail}`;
+                console.error(errMsg);
+                // console.error("Request payload was:", JSON.stringify(payload, null, 2)); // Careful logging large payloads
+                throw new Error(errMsg);
+            }
+
+            const responseJson = await txResponse.json();
+            console.log(
+                `[MewAPI] Batch transaction ${transactionId} successful.`
+                // Optionally log: Response:`, responseJson
+            );
+            return responseJson;
+        } catch (error) {
+            console.error(
+                `[MewAPI] Error during batch send fetch operation (TxID: ${transactionId}):`,
+                error
+            );
+            throw error;
+        }
+    }
+
+    // --- Helper Operation Generators ---
+
+    /**
+     * Generates the Mew API operations needed to add a single property
+     * (value node, relation, label node, type relation) to a parent node.
+     * NOTE: Creates a new label node defensively.
+     * @returns An array of Mew API operation objects.
+     */
+    public generatePropertyOperations(
+        parentNodeId: string,
+        relationLabel: string,
+        value: string,
+        authorId: string,
+        timestamp: number
+    ): any[] {
+        const updates: any[] = [];
+        const propertyNodeId = this.uuid();
+        const propertyTypeRelationId = this.uuid();
+        const propertyRelationId = this.uuid();
+        const labelNodeId = this.uuid(); // Create label node defensively
+        const fracSuffix = crypto.randomBytes(4).toString("hex"); // Unique suffix for ordering
+
+        // a. Add the node holding the property value
+        updates.push({
+            operation: "addNode",
+            node: {
+                version: 1,
+                id: propertyNodeId,
+                authorId: authorId,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+                content: createNodeContent({
+                    type: NodeContentType.Text,
+                    text: value,
+                }),
+                isPublic: true,
+                isNewRelatedObjectsPublic: false,
+                canonicalRelationId: propertyRelationId,
+                isChecked: null,
+            },
+        });
+
+        // b. Add the relation for the property (Parent Node -> Value Node)
+        updates.push({
+            operation: "addRelation",
+            relation: {
+                version: 1,
+                id: propertyRelationId,
+                authorId: authorId,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+                fromId: parentNodeId,
+                toId: propertyNodeId,
+                relationTypeId: "child", // Generic type
+                isPublic: true,
+                canonicalRelationId: propertyTypeRelationId, // Link to type relation
+            },
+            fromPos: { int: timestamp, frac: `a${fracSuffix}` },
+            toPos: { int: timestamp, frac: `b${fracSuffix}` },
+        });
+        updates.push({
+            operation: "updateRelationList",
+            relationId: propertyRelationId,
+            oldPosition: null,
+            newPosition: { int: timestamp, frac: "a0" },
+            authorId: authorId,
+            type: "all",
+            oldIsPublic: true,
+            newIsPublic: true,
+            nodeId: parentNodeId,
+            relatedNodeId: propertyNodeId,
+        });
+
+        // c. Add the label node (e.g., "email_home")
+        updates.push({
+            operation: "addNode",
+            node: {
+                version: 1,
+                id: labelNodeId,
+                authorId: authorId,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+                content: createNodeContent({
+                    type: NodeContentType.Text,
+                    text: relationLabel,
+                }),
+                isPublic: true,
+                isNewRelatedObjectsPublic: false,
+                canonicalRelationId: null,
+                isChecked: null,
+            },
+        });
+
+        // d. Add the __type__ relation (Property Relation -> Label Node)
+        updates.push({
+            operation: "addRelation",
+            relation: {
+                version: 1,
+                id: propertyTypeRelationId,
+                authorId: authorId,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+                fromId: propertyRelationId,
+                toId: labelNodeId,
+                relationTypeId: "__type__",
+                isPublic: true,
+                canonicalRelationId: null,
+            },
+            fromPos: { int: timestamp, frac: `c${fracSuffix}` },
+            toPos: { int: timestamp, frac: `d${fracSuffix}` },
+        });
+        updates.push({
+            operation: "updateRelationList",
+            relationId: propertyTypeRelationId,
+            oldPosition: null,
+            newPosition: { int: timestamp, frac: "c0" },
+            authorId: authorId,
+            type: "all",
+            oldIsPublic: true,
+            newIsPublic: true,
+            nodeId: propertyRelationId,
+            relatedNodeId: labelNodeId,
+        });
+
+        // Note: Step 3e (updateRelation for propertyRelationId) from previous logic is removed,
+        // as we now set canonicalRelationId directly during the creation of propertyRelationId in step 3b.
+
+        return updates;
+    }
+
+    /**
+     * Generates the Mew API operation needed to update the content of an existing node.
+     * Requires fetching the node's existing state to provide oldProps.
+     * @returns A single updateNode operation object, or null if node data cannot be fetched.
+     */
+    public async _generateUpdateNodeContentOperation(
+        nodeId: string,
+        newTextValue: string,
+        timestamp: number = Date.now()
+    ): Promise<any | null> {
+        // Fetch existing node data - Required for oldProps
+        // Consider batching fetches if called frequently in a loop outside a batch transaction
+        let existingNode: GraphNode;
+        try {
+            const layerData = await this.getLayerData([nodeId]);
+            existingNode = layerData.data.nodesById[nodeId];
+            if (!existingNode) {
+                console.warn(
+                    `[MewAPI._generateUpdate] Node ${nodeId} not found, cannot generate update op.`
+                );
+                return null;
+            }
+        } catch (fetchError) {
+            console.error(
+                `[MewAPI._generateUpdate] Error fetching node ${nodeId} for update:`,
+                fetchError
+            );
+            return null;
+        }
+
+        const newContent = createNodeContent({
+            type: "text",
+            text: newTextValue,
+        });
+
+        // Avoid generating an update if content hasn't actually changed
+        // Note: This requires getNodeTextContent or similar logic if content structure varies
+        const existingText = getNodeTextContent(existingNode);
+        if (existingText === newTextValue) {
+            // console.log(`[MewAPI._generateUpdate] Content for node ${nodeId} unchanged, skipping update op.`);
+            return null; // No operation needed
+        }
+
+        return {
+            operation: "updateNode",
+            oldProps: {
+                ...existingNode,
+                content: createNodeContent(existingNode.content), // Ensure old content is formatted
+                updatedAt: existingNode.updatedAt, // Use existing timestamp for oldProps
+            },
+            newProps: {
+                ...existingNode,
+                content: newContent,
+                updatedAt: timestamp, // Update timestamp for newProps
+            },
+        };
+    }
+
+    /**
+     * Generates the Mew API operation needed to delete a node.
+     * @returns A single deleteNode operation object.
+     */
+    public _generateDeleteNodeOperation(nodeId: string): any {
+        // TODO: Enhance to also generate operations to delete related relations?
+        // This is complex as it requires knowing which relations should be cleaned up.
+        return {
+            operation: "deleteNode",
+            node: { id: nodeId },
+        };
+    }
 }
 
+/**
+ * Parses the Mew User ID from a user's root node URL.
+ * Validates the URL format specific to the mew-edge.ideaflow.app structure.
+ * Handles URL decoding, including pipe characters (%7C).
+ * @param url The user root URL string.
+ * @returns {string} The extracted Mew User ID.
+ * @throws {Error} If the URL format is invalid.
+ */
 export const parseNodeIdFromUrl = (url: string): string => {
     const regex =
         /^https?:\/\/mew-edge\.ideaflow\.app\/g\/all\/global-root-to-users\/all\/users-to-user-relation-id-[^\/]+\/user-root-id-[^\/]+$/;
@@ -968,6 +1258,7 @@ export const parseNodeIdFromUrl = (url: string): string => {
     return decoded;
 };
 
+/** Represents the structure of a Mew Graph Node based on observed API responses. */
 export interface GraphNode {
     version: number;
     id: string;
@@ -982,17 +1273,13 @@ export interface GraphNode {
     isChecked: boolean | null;
 }
 
+/** Represents a single block of content within a node's `content` array. */
 export interface ContentBlock {
     type: "text" | "mention"; // Could be expanded if there are other types
     value: string;
 }
 
-interface User {
-    id: string;
-    username: string;
-    email: string;
-}
-
+/** Represents the structure of a Mew Relation based on observed API responses. */
 export interface Relation {
     id: string;
     version: number;
@@ -1006,6 +1293,14 @@ export interface Relation {
     canonicalRelationId: string | null;
 }
 
+/** Defines the expected structure for user data within API responses. */
+interface User {
+    id: string;
+    username: string;
+    email: string;
+}
+
+/** Defines the overall structure of the data returned by the /sync or /layer endpoints. */
 interface SyncResponse {
     data: {
         usersById: {
@@ -1020,8 +1315,47 @@ interface SyncResponse {
     };
 }
 
+/** Defines the structure of the response from the Auth0 token endpoint. */
 interface TokenData {
     access_token: string;
     expires_in: number;
     token_type: string;
 }
+
+/**
+ * Represents the structure of contact data expected from the source (Apple Contacts).
+ * This interface defines the input structure for methods like batchAddContacts.
+ */
+export interface AppleContact {
+    identifier: string; // CNContactIdentifierKey
+    givenName?: string | null; // CNContactGivenNameKey
+    familyName?: string | null; // CNContactFamilyNameKey
+    organizationName?: string | null; // CNContactOrganizationNameKey
+    phoneNumbers?: { label?: string | null; value: string }[] | null; // CNContactPhoneNumbersKey
+    emailAddresses?: { label?: string | null; value: string }[] | null; // CNContactEmailAddressesKey
+    note?: string | null; // CNContactNoteKey
+    // Add other keys as needed
+}
+
+// --- Utility Functions (Internal to MewService) ---
+
+/**
+ * Extracts the text value from a simple Mew text node's content array.
+ * @param node The Mew GraphNode to extract text from.
+ * @returns {string | null} The text value or null if not found/applicable.
+ */
+export function getNodeTextContent(
+    node: GraphNode | null | undefined
+): string | null {
+    if (
+        node &&
+        node.content &&
+        node.content.length > 0 &&
+        node.content[0].type === "text"
+    ) {
+        return node.content[0].value;
+    }
+    return null;
+}
+
+// --- End Utility Functions ---

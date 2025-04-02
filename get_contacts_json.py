@@ -14,11 +14,23 @@ from Foundation import NSAutoreleasePool
 from libdispatch import dispatch_semaphore_create, dispatch_semaphore_wait, dispatch_semaphore_signal, DISPATCH_TIME_FOREVER
 
 def log_stderr(message):
-    """Log a message to stderr."""
+    """Prints a log message to stderr with a timestamp and script prefix.
+
+    Args:
+        message (str): The message to log.
+    """
     print(f"[{time.strftime('%H:%M:%S')}][Python] {message}", file=sys.stderr)
 
 def get_required_keys():
-    """Get all required keys for contact fetching."""
+    """Returns a list of CNContact keys needed for the sync process.
+
+    Ensures essential keys like identifier, name components, organization,
+    phone, email, and note are included.
+    Removes duplicates while preserving order.
+
+    Returns:
+        list: A list of CNContactKey constants.
+    """
     keys = [
         CNContactGivenNameKey,
         CNContactFamilyNameKey,
@@ -39,7 +51,19 @@ def get_required_keys():
 KEYS_TO_FETCH = get_required_keys()
 
 def request_access(store):
-    """Request access to contacts, exits if denied."""
+    """Checks for and requests authorization to access macOS Contacts.
+
+    Uses the Contacts framework to check the current status. If access is
+    not determined, it requests access and waits synchronously for the user's
+    response. If access is denied or restricted, it logs an error and exits
+    the script.
+
+    Args:
+        store (CNContactStore): An instance of the contact store.
+
+    Returns:
+        bool: True if access is granted, otherwise the script exits.
+    """
     # Create a semaphore for synchronization
     semaphore = dispatch_semaphore_create(0)
     granted = [False]  # Use list to allow modification in callback
@@ -76,7 +100,18 @@ def request_access(store):
     return True
 
 def fetch_contacts(store):
-    """Fetches all contacts from the store."""
+    """Fetches all contacts from the provided CNContactStore.
+
+    Uses a CNContactFetchRequest with the keys defined in KEYS_TO_FETCH.
+    Enumerates contacts and returns them as a list of raw CNContact objects.
+    Handles potential errors during fetching.
+
+    Args:
+        store (CNContactStore): An authorized instance of the contact store.
+
+    Returns:
+        list | None: A list of CNContact objects, or None if fetching fails.
+    """
     pool = NSAutoreleasePool.alloc().init()
     log_stderr("Fetching contacts...")
     all_contacts_raw = []
@@ -105,7 +140,20 @@ def fetch_contacts(store):
         del pool
 
 def format_contacts_to_json(contacts_raw):
-    """Formats CNContact objects into a JSON serializable list."""
+    """Formats a list of raw CNContact objects into a JSON serializable list.
+
+    Iterates through the raw contacts, extracts the required fields
+    (identifier, names, org, note, phones, emails), and structures them
+    into dictionaries matching the format expected by the Node.js script.
+    Handles potential missing keys and formats labeled values (phone/email).
+
+    Args:
+        contacts_raw (list): A list of CNContact objects from fetch_contacts.
+
+    Returns:
+        list: A list of dictionaries, where each dictionary represents a contact
+              in a JSON-friendly format.
+    """
     contacts_list = []
     for contact in contacts_raw:
         pool = NSAutoreleasePool.alloc().init() # Pool per contact iteration
@@ -151,6 +199,12 @@ def format_contacts_to_json(contacts_raw):
     return contacts_list
 
 if __name__ == "__main__":
+    """Main execution block.
+
+    Initializes the contact store, requests access, fetches contacts,
+    formats them to JSON, and prints the JSON array to stdout.
+    Logs progress and errors to stderr.
+    """
     store = CNContactStore.alloc().init()
 
     if request_access(store):
