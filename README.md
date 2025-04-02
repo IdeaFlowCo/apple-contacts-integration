@@ -1,32 +1,46 @@
-# Apple Contacts Sync
+# Apple Contacts Integration
 
-A Python script that syncs contacts from macOS Contacts app using `pyobjc-framework-Contacts`.
+A TypeScript/Node.js application that integrates with macOS Contacts using Python for native contact access.
 
 ## Features
 
 * Access and display contacts from macOS Contacts
-* Real-time contact updates (planned)
-* Simple command-line interface
+* Export contacts as JSON
+* TypeScript/Node.js interface with Python backend
 
 ## Requirements
 
 * macOS
+* Node.js
 * Python 3
 * `pyobjc-framework-Contacts`
 
 ## Installation
 
 1. Clone this repository
-2. Install dependencies:
+2. Install Node.js dependencies:
+   ```bash
+   npm install
+   ```
+3. Install Python dependencies:
    ```bash
    pip install -r requirements.txt
+   ```
+4. Build TypeScript:
+   ```bash
+   npx tsc
    ```
 
 ## Usage
 
-```bash
-python main.py
-```
+1. Build the TypeScript code:
+   ```bash
+   npx tsc
+   ```
+2. Run the application:
+   ```bash
+   node dist/mewContacts.js
+   ```
 
 ## Permission Setup
 
