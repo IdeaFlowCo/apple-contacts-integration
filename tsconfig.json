@@ -1,0 +1,29 @@
+{
+    "compilerOptions": {
+        /* Base Options */
+        "target": "ES2016",
+        "module": "NodeNext",
+        "esModuleInterop": true,
+        "forceConsistentCasingInFileNames": true,
+
+        /* Strict Type-Checking Options */
+        "strict": true,
+        "skipLibCheck": true,
+
+        /* Module Resolution Options */
+        "moduleResolution": "NodeNext", // Changed from node
+        // Add node types explicitly
+        "types": ["node"],
+
+        /* Output options */
+        "outDir": "./dist", // Output JS files to a dist directory
+        "rootDir": "./", // Specify root directory of source files
+
+        /* Source Map Options */
+        "sourceMap": true
+    },
+    "include": [
+        "**/*.ts" // Include all ts files in the project
+    ],
+    "exclude": ["node_modules", "**/*.spec.ts"]
+}

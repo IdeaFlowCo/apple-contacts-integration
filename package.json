@@ -1,0 +1,25 @@
+{
+    "name": "apple-contacts-integration",
+    "version": "1.0.0",
+    "description": "This Python script demonstrates how to access and display contacts from the macOS Contacts app using the `pyobjc-framework-Contacts` library.",
+    "main": "index.js",
+    "type": "module",
+    "scripts": {
+        "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/ydoc5212/apple-contacts-integration.git"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "bugs": {
+        "url": "https://github.com/ydoc5212/apple-contacts-integration/issues"
+    },
+    "homepage": "https://github.com/ydoc5212/apple-contacts-integration#readme",
+    "dependencies": {
+        "@types/node-fetch": "^2.6.12",
+        "node-fetch": "^3.3.2"
+    }
+}
