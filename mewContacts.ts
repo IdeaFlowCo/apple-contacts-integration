@@ -1,16 +1,18 @@
 /* mewContacts.ts - Manages syncing Apple Contacts to Mew */
 
-import { fileURLToPath } from "url";
-import { resolve } from "path";
-import { execSync } from "child_process"; // For executing Python script
+import { spawn } from "child_process"; // Changed from execSync to spawn
 import {
     MewAPI,
     parseNodeIdFromUrl,
     getNodeTextContent,
     Relation,
     AppleContact,
+    MewContact,
+    Operation,
 } from "./MewService.js"; // Assuming MewService exports necessary types
 import console from "console";
+import { fileURLToPath } from "url";
+import { resolve } from "path";
 
 // --- Type Definitions ---
 
@@ -463,82 +465,45 @@ export async function syncContactToMew(
         }
 
         // 2. Check/Update Properties
-        // console.log(`[MewContacts]  - Checking properties...`);
-        const propertiesToSync = [
-            { key: "phoneNumbers", baseLabel: "phone", array: true },
-            { key: "emailAddresses", baseLabel: "email", array: true },
-            {
-                key: "organizationName",
-                baseLabel: "organization",
-                array: false,
-            },
-            { key: "note", baseLabel: "note", array: false },
-        ];
-        const appleValuesProcessed = new Set<string>(); // Track which specific apple values (e.g., phone number string) have been handled
-
         // Create a mutable copy of existing properties to track handled/deleted ones
         const mewProperties = new Map(existingInfo.properties.entries());
 
-        for (const propInfo of propertiesToSync) {
-            const applePropData = appleData[propInfo.key as keyof AppleContact];
+        // First pass: Check for properties that need to be updated or added
+        for (const [key, value] of Object.entries(appleData)) {
+            // Skip non-property fields
+            if (
+                key === "identifier" ||
+                key === "givenName" ||
+                key === "familyName"
+            )
+                continue;
 
-            if (propInfo.array && Array.isArray(applePropData)) {
-                // Handle arrays like phoneNumbers, emailAddresses
-                const items = applePropData as {
-                    label?: string | null;
-                    value: string;
-                }[];
-                for (const item of items) {
-                    if (!item.value) continue;
-                    appleValuesProcessed.add(item.value); // Mark this value as present in source
+            // Handle arrays (like phoneNumbers, emailAddresses)
+            if (Array.isArray(value)) {
+                for (const item of value) {
+                    if (!item || !item.value) continue;
 
-                    const sanitizedLabel = item.label
-                        ? item.label.replace(/[^a-zA-Z0-9]/g, "_").toLowerCase()
-                        : "";
-                    const relationLabel = sanitizedLabel
-                        ? `${propInfo.baseLabel}_${sanitizedLabel}`
-                        : propInfo.baseLabel;
+                    const label = item.label ? item.label.toLowerCase() : "";
+                    const relationLabel = label ? `${key}_${label}` : key;
 
                     const existingProp = mewProperties.get(relationLabel);
 
                     if (existingProp) {
-                        // Property with this label exists in Mew
-
-                        // --- Debug & Normalize Comparison ---
-                        let appleItemValue = item.value;
-                        let existingMewValue = existingProp.value;
+                        // Property exists, check if update needed
                         let needsUpdate = false;
-
-                        if (propInfo.baseLabel === "email") {
-                            // Specific handling for email
-                            appleItemValue =
-                                appleItemValue?.trim().toLowerCase() || "";
-                            existingMewValue =
-                                existingMewValue?.trim().toLowerCase() || null; // Keep null distinct from empty
-                            // Update only if non-null apple value differs from mew value, or if apple is empty but mew wasn't null
+                        if (key === "emailAddresses") {
+                            const appleValue = item.value.trim().toLowerCase();
+                            const existingValue =
+                                existingProp.value?.trim().toLowerCase() ||
+                                null;
                             needsUpdate =
-                                (appleItemValue &&
-                                    appleItemValue !== existingMewValue) ||
-                                (!appleItemValue && existingMewValue !== null);
+                                (appleValue && appleValue !== existingValue) ||
+                                (!appleValue && existingValue !== null);
                         } else {
-                            // Generic comparison for other types
-                            needsUpdate = existingMewValue !== appleItemValue;
+                            needsUpdate = existingProp.value !== item.value;
                         }
-                        // Log the comparison details if an update seems needed
-                        if (needsUpdate) {
-                            console.log(
-                                `[DEBUG] Comparing ${relationLabel}: Mew='${
-                                    existingProp.value
-                                }'(${typeof existingProp.value}) vs Apple='${
-                                    item.value
-                                }'(${typeof item.value}). Normalized requires update: ${needsUpdate}`
-                            );
-                        }
-                        // --- End Debug & Normalize ---
 
                         if (needsUpdate) {
-                            // Use the needsUpdate flag
-                            // Value mismatch - Update needed
                             console.log(
                                 `[MewContacts]  -- UPDATE Property ${relationLabel} (Node ${existingProp.propertyNodeId}): \'${existingProp.value}\' -> \'${item.value}\'`
                             );
@@ -550,14 +515,12 @@ export async function syncContactToMew(
                                 );
                             if (updateOp) operations.push(updateOp);
                         }
-                        // Mark as handled by removing from the temp map
                         mewProperties.delete(relationLabel);
                     } else {
-                        // Property with this label does NOT exist in Mew - Add needed
+                        // Property doesn't exist, add it
                         console.log(
                             `[MewContacts]  -- ADD Property ${relationLabel}: \'${item.value}\'`
                         );
-                        // Generate ADD operations using the helper
                         const addOps = mewApi.generatePropertyOperations(
                             mewContactId,
                             relationLabel,
@@ -568,56 +531,33 @@ export async function syncContactToMew(
                         operations.push(...addOps);
                     }
                 }
-            } else if (
-                !propInfo.array &&
-                typeof applePropData === "string" &&
-                applePropData
-            ) {
-                // Handle simple string properties (org, note)
-                const appleValue = applePropData;
-                const relationLabel = propInfo.baseLabel;
-                appleValuesProcessed.add(appleValue); // Mark this value as present in source
-
+            } else if (typeof value === "string" && value) {
+                // Handle simple string properties
+                const relationLabel = key;
                 const existingProp = mewProperties.get(relationLabel);
+
                 if (existingProp) {
-                    // Property exists
-
-                    // --- Debug Comparison ---
-                    let needsUpdate = existingProp.value !== appleValue;
-                    if (needsUpdate) {
+                    if (existingProp.value !== value) {
                         console.log(
-                            `[DEBUG] Comparing ${relationLabel}: Mew='${
-                                existingProp.value
-                            }'(${typeof existingProp.value}) vs Apple='${appleValue}'(${typeof appleValue}). Requires update: ${needsUpdate}`
-                        );
-                    }
-                    // --- End Debug ---
-
-                    if (needsUpdate) {
-                        // Value mismatch - Update needed
-                        console.log(
-                            `[MewContacts]  -- UPDATE Property ${relationLabel} (Node ${existingProp.propertyNodeId}): \'${existingProp.value}\' -> \'${appleValue}\'`
+                            `[MewContacts]  -- UPDATE Property ${relationLabel} (Node ${existingProp.propertyNodeId}): \'${existingProp.value}\' -> \'${value}\'`
                         );
                         const updateOp =
                             await mewApi._generateUpdateNodeContentOperation(
                                 existingProp.propertyNodeId,
-                                appleValue,
+                                value,
                                 timestamp
                             );
                         if (updateOp) operations.push(updateOp);
                     }
-                    // Mark as handled by removing from the temp map
                     mewProperties.delete(relationLabel);
                 } else {
-                    // Property does not exist - Add needed
                     console.log(
-                        `[MewContacts]  -- ADD Property ${relationLabel}: \'${appleValue}\'`
+                        `[MewContacts]  -- ADD Property ${relationLabel}: \'${value}\'`
                     );
-                    // Generate ADD operations using the helper
                     const addOps = mewApi.generatePropertyOperations(
                         mewContactId,
                         relationLabel,
-                        appleValue,
+                        value,
                         authorId,
                         timestamp
                     );
@@ -626,8 +566,8 @@ export async function syncContactToMew(
             }
         }
 
-        // 3. Handle Deletion of properties remaining in the map
-        if (mewProperties.size > 0) {
+        // Second pass: Only check for properties to delete if we have operations to perform
+        if (operations.length > 0 && mewProperties.size > 0) {
             console.log(
                 `[MewContacts]  - Checking for ${mewProperties.size} properties to delete...`
             );
@@ -642,204 +582,188 @@ export async function syncContactToMew(
                 console.log(
                     `[MewContacts]  -- DELETE Property ${labelToDelete} (Node ${propInfoToDelete.propertyNodeId}): Value \'${propInfoToDelete.value}\'`
                 );
-                // Generate DELETE operation
                 const deleteOp = mewApi._generateDeleteNodeOperation(
                     propInfoToDelete.propertyNodeId
                 );
                 operations.push(deleteOp);
-                // TODO: Consider deleting label node + relations if they become orphaned?
             }
+        }
+
+        // Only log if we actually generated operations
+        if (operations.length > 0) {
+            console.log(
+                `[MewContacts] Generated ${operations.length} operations for ${contactDisplayName}`
+            );
+        } else {
+            console.log(
+                `[MewContacts] No changes needed for ${contactDisplayName}`
+            );
         }
     } catch (error) {
         console.error(
             `[MewContacts] Failed generating operations for contact ${contactDisplayName} (Apple ID: ${appleData.identifier}, Mew ID: ${existingInfo.mewId}):`,
             error
         );
-        // Return empty array or re-throw? Returning empty means this contact's updates are skipped.
         return [];
     }
 
-    // Return the collected operations for this contact
-    if (operations.length > 0) {
-        console.log(
-            `[MewContacts] Generated ${operations.length} operations for ${contactDisplayName}`
-        );
-    }
     return operations;
 }
 
 /**
- * Main processing function for the contact sync script.
- * Orchestrates fetching contacts from the Python script, determining which contacts
- * exist in Mew, batch-creating new contacts, and sequentially updating existing ones.
- * @param userRootUrl The root URL for the user's Mew space (passed as CLI argument).
- * @param contactsJsonString Raw JSON string fetched from the Python script,
- *                         containing an array of AppleContact objects.
+ * Main processing function for syncing Apple Contacts to Mew.
+ * This function orchestrates the entire sync process:
+ * 1. Parses incoming contact data
+ * 2. Ensures the contacts folder exists
+ * 3. Fetches existing contact information
+ * 4. Processes new, modified, and deleted contacts
+ * 5. Performs batch operations for efficiency
+ *
+ * @param userRootUrl - The root URL for the user's Mew space
+ * @param contactsJsonString - Raw JSON string containing contact data from Apple
  */
 export async function processContacts(
     userRootUrl: string,
     contactsJsonString: string
 ): Promise<void> {
-    console.log("[MewContacts] Starting contact processing...");
-    userRootUrlGlobal = userRootUrl; // Set the global URL
+    // Parse incoming data and ensure contacts folder exists
+    const contactsData = JSON.parse(contactsJsonString);
+    const contactsFolderId = await ensureMyContactsFolder();
+    const existingMewContactsMap = await fetchExistingContactInfo(
+        contactsFolderId.folderId
+    );
 
-    let contactsData: AppleContact[];
-    try {
-        contactsData = JSON.parse(contactsJsonString);
-        if (!Array.isArray(contactsData)) {
-            throw new Error("Parsed data is not an array.");
-        }
-        console.log(
-            `[MewContacts] Successfully parsed ${contactsData.length} contacts.`
+    // Track contacts that need creation or updates
+    const contactsToCreate: AppleContact[] = [];
+    const contactsToUpdate: { appleData: AppleContact; mewId: string }[] = [];
+
+    // Handle both old and new message formats for backward compatibility
+    const contacts = Array.isArray(contactsData)
+        ? contactsData
+        : contactsData.contacts;
+    if (!Array.isArray(contacts)) {
+        console.error(
+            "[MewContacts] Invalid contacts data format:",
+            contactsData
         );
-    } catch (error) {
-        console.error("[MewContacts] Failed to parse contacts JSON:", error);
-        process.exit(1);
+        return;
     }
 
-    try {
-        // Ensure the contacts folder exists and get its ID and creation status
-        const { folderId: contactsFolderId, created: isNewFolder } =
-            await ensureMyContactsFolder();
-
-        if (!contactsFolderId) {
-            throw new Error("Failed to find or create the contacts folder.");
+    // First pass: Identify contacts that need creation or updates
+    for (const contact of contacts) {
+        if (!contact || typeof contact !== "object" || !contact.identifier) {
+            console.warn(
+                "[MewContacts] Skipping invalid contact data:",
+                contact
+            );
+            continue;
         }
 
-        console.log(
-            `[MewContacts] Using contacts folder ID: ${contactsFolderId} (Newly Created: ${isNewFolder})`
+        const existingContactInfo = existingMewContactsMap.get(
+            contact.identifier
         );
+        const changeType = contact.change_type;
 
-        // --- Optimization: Fetch existing contact identifiers in batch ---
-        // If the contacts folder already exists, fetch all children and their
-        // corresponding Apple identifiers into a map for efficient lookup.
-        let existingMewContactsMap = new Map<string, ExistingContactInfo>(); // Updated type
-
-        if (!isNewFolder) {
-            console.log(
-                `[MewContacts] Fetching existing contacts from folder ${contactsFolderId}...`
-            );
-            try {
-                existingMewContactsMap = await fetchExistingContactInfo(
-                    contactsFolderId
-                );
-            } catch (error) {
-                console.error(
-                    `[MewContacts] Error fetching existing contact identifiers:`,
-                    error,
-                    "Proceeding with individual checks."
-                );
-                // Keep map empty on error
-            }
-            console.log(
-                `[MewContacts] Found ${existingMewContactsMap.size} existing contacts in Mew folder.`
-            );
-        } else {
-            console.log(
-                "[MewContacts] Skipping fetch of existing contacts as folder is new."
-            );
+        // Handle new contacts - add to creation list
+        if (changeType === "added") {
+            contactsToCreate.push(contact);
+            continue;
         }
-        // --- End Optimization ---
 
-        const contactsToCreate: AppleContact[] = []; // Use AppleContact type
-        const contactsToUpdate: { appleData: AppleContact; mewId: string }[] =
-            [];
+        // Handle modified contacts - check if they actually need updates
+        if (changeType === "modified" && existingContactInfo) {
+            const contactDisplayName =
+                `${contact.givenName || ""} ${
+                    contact.familyName || ""
+                }`.trim() ||
+                contact.organizationName ||
+                "Unnamed Contact";
 
-        // Separate contacts into create/update lists based on the map
-        for (const contact of contactsData) {
-            // Basic validation
-            if (
-                !contact ||
-                typeof contact !== "object" ||
-                !contact.identifier
-            ) {
-                console.warn(
-                    "[MewContacts] Skipping invalid contact data:",
-                    contact
-                );
-                continue;
-            }
+            // Check if name has changed
+            const nameChanged = existingContactInfo.name !== contactDisplayName;
 
-            const existingContactInfo = existingMewContactsMap.get(
-                contact.identifier
-            );
-            if (existingContactInfo) {
-                // Exists in Mew, needs update check
+            // Check if any properties have actually changed
+            const hasPropertyChanges =
+                // Check phone numbers for changes
+                contact.phoneNumbers?.some(
+                    (phone: { label?: string; value: string }) => {
+                        const existingPhone =
+                            existingContactInfo.properties.get(
+                                `phone_${phone.label?.toLowerCase() || ""}`
+                            );
+                        return (
+                            !existingPhone ||
+                            normalizeValue(existingPhone.value || "") !==
+                                normalizeValue(phone.value)
+                        );
+                    }
+                ) ||
+                false ||
+                // Check email addresses for changes
+                contact.emailAddresses?.some(
+                    (email: { label?: string; value: string }) => {
+                        const existingEmail =
+                            existingContactInfo.properties.get(
+                                `email_${email.label?.toLowerCase() || ""}`
+                            );
+                        return (
+                            !existingEmail ||
+                            normalizeValue(existingEmail.value || "") !==
+                                normalizeValue(email.value)
+                        );
+                    }
+                ) ||
+                false ||
+                // Check organization name for changes
+                (contact.organizationName &&
+                    existingContactInfo.properties.get("organization")
+                        ?.value !== contact.organizationName) ||
+                // Check note for changes
+                (contact.note &&
+                    existingContactInfo.properties.get("note")?.value !==
+                        contact.note);
+
+            // Only add to update list if there are actual changes
+            if (nameChanged || hasPropertyChanges) {
                 contactsToUpdate.push({
                     appleData: contact,
                     mewId: existingContactInfo.mewId,
-                }); // Pass mewId
-            } else {
-                // Does not exist in Mew, needs creation
-                contactsToCreate.push(contact); // Push the full contact object
+                });
             }
         }
+    }
 
-        console.log(
-            `[MewContacts] Planning: ${contactsToCreate.length} creates, ${contactsToUpdate.length} updates.`
-        );
-
-        // --- Chunked Batch Create ---
-        // Create new contacts in batches to improve performance and avoid server timeouts.
-        if (contactsToCreate.length > 0) {
-            console.log(
-                `[MewContacts] Starting batch creation for ${contactsToCreate.length} contacts in chunks of ${BATCH_CHUNK_SIZE}...`
-            );
-            let createdCount = 0;
-            for (
-                let i = 0;
-                i < contactsToCreate.length;
-                i += BATCH_CHUNK_SIZE
-            ) {
-                const chunk = contactsToCreate.slice(i, i + BATCH_CHUNK_SIZE);
-                console.log(
-                    `[MewContacts] Processing chunk ${
-                        i / BATCH_CHUNK_SIZE + 1
-                    } / ${Math.ceil(
-                        contactsToCreate.length / BATCH_CHUNK_SIZE
-                    )} (Contacts ${i + 1} - ${i + chunk.length})`
+    // --- Phase 1: Batch Create New Contacts ---
+    if (contactsToCreate.length > 0) {
+        let createdCount = 0;
+        // Process contacts in chunks to avoid overwhelming the API
+        for (let i = 0; i < contactsToCreate.length; i += BATCH_CHUNK_SIZE) {
+            const chunk = contactsToCreate.slice(i, i + BATCH_CHUNK_SIZE);
+            try {
+                const createdMap = await mewApi.batchAddContacts(
+                    chunk,
+                    contactsFolderId.folderId
                 );
-
-                try {
-                    const createdMap = await mewApi.batchAddContacts(
-                        chunk,
-                        contactsFolderId
-                    );
-                    createdCount += createdMap.size;
-                    console.log(
-                        `[MewContacts] Chunk ${
-                            i / BATCH_CHUNK_SIZE + 1
-                        } successful. ${
-                            createdMap.size
-                        } contacts created in this chunk.`
-                    );
-                    // Optional: Short delay between chunks if needed?
-                    // await new Promise(resolve => setTimeout(resolve, 200));
-                } catch (error) {
-                    console.error(
-                        `[MewContacts] Batch creation failed for chunk starting at index ${i}:`,
-                        error
-                    );
-                    // Decide how to proceed - skip remaining? Try sequential for this chunk?
-                    // For now, we'll stop the entire sync if one chunk fails.
-                    throw new Error(
-                        `Batch creation failed on chunk ${
-                            i / BATCH_CHUNK_SIZE + 1
-                        }, stopping sync.`
-                    );
-                }
+                createdCount += createdMap.size;
+            } catch (error) {
+                console.error(
+                    `[MewContacts] Batch creation failed for chunk starting at index ${i}:`,
+                    error
+                );
+                throw new Error(
+                    `Batch creation failed on chunk ${
+                        i / BATCH_CHUNK_SIZE + 1
+                    }, stopping sync.`
+                );
             }
-            console.log(
-                `[MewContacts] Batch creation phase completed. Total contacts created: ${createdCount}`
-            );
         }
-        // --- End Chunked Batch Create ---
+        console.log(`[MewContacts] Created ${createdCount} new contacts`);
+    }
 
-        // --- Generate Update Operations ---
-        console.log(
-            `[MewContacts] Generating update/delete operations for ${contactsToUpdate.length} existing contacts...`
-        );
+    // --- Phase 2: Update Modified Contacts ---
+    if (contactsToUpdate.length > 0) {
         let allUpdateOps: any[] = [];
+        // Generate update operations for each modified contact
         for (const updateInfo of contactsToUpdate) {
             const existingInfo = existingMewContactsMap.get(
                 updateInfo.appleData.identifier
@@ -850,47 +774,26 @@ export async function processContacts(
                 );
                 continue;
             }
-            // Get operations needed for this specific contact
             const contactOps = await syncContactToMew(
                 updateInfo.appleData,
                 existingInfo
             );
-            allUpdateOps.push(...contactOps); // Aggregate operations
+            if (contactOps.length > 0) {
+                allUpdateOps.push(...contactOps);
+            }
         }
-        console.log(
-            `[MewContacts] Generated a total of ${allUpdateOps.length} update/delete operations.`
-        );
 
-        // --- Send Update Operations in Chunks ---
+        // Send update operations in chunks
         if (allUpdateOps.length > 0) {
-            console.log(
-                `[MewContacts] Sending ${allUpdateOps.length} update/delete operations in chunks of ${BATCH_CHUNK_SIZE} operations...`
-                // Note: Chunk size here is based on *operations*, not contacts
-            );
             for (let i = 0; i < allUpdateOps.length; i += BATCH_CHUNK_SIZE) {
                 const chunk = allUpdateOps.slice(i, i + BATCH_CHUNK_SIZE);
-                console.log(
-                    `[MewContacts] Sending update chunk ${
-                        i / BATCH_CHUNK_SIZE + 1
-                    } / ${Math.ceil(allUpdateOps.length / BATCH_CHUNK_SIZE)} (${
-                        chunk.length
-                    } operations)`
-                );
                 try {
-                    await mewApi.sendBatchOperations(chunk); // Send the chunk of operations
-                    console.log(
-                        `[MewContacts] Update chunk ${
-                            i / BATCH_CHUNK_SIZE + 1
-                        } successful.`
-                    );
-                    // Optional delay?
-                    // await new Promise(resolve => setTimeout(resolve, 100));
+                    await mewApi.sendBatchOperations(chunk);
                 } catch (error) {
                     console.error(
                         `[MewContacts] Batch update failed for chunk starting at index ${i}:`,
                         error
                     );
-                    // Decide how to proceed
                     throw new Error(
                         `Batch update failed on chunk ${
                             i / BATCH_CHUNK_SIZE + 1
@@ -898,78 +801,437 @@ export async function processContacts(
                     );
                 }
             }
-            console.log(`[MewContacts] Batch update phase completed.`);
+            console.log(
+                `[MewContacts] Updated ${allUpdateOps.length} contacts`
+            );
         }
-        // --- End Send Update Operations ---
+    }
 
-        console.log("[MewContacts] Sync finished successfully.");
-    } catch (error) {
-        console.error("[MewContacts] Sync process failed:", error);
-        process.exit(1);
+    // --- Phase 3: Handle Deleted Contacts ---
+    if (contactsData.deleted_contacts?.length > 0) {
+        const deleteOps: any[] = [];
+
+        // Generate delete operations for deleted contacts
+        for (const deletedId of contactsData.deleted_contacts) {
+            const existingInfo = existingMewContactsMap.get(deletedId);
+            if (existingInfo) {
+                deleteOps.push({
+                    type: "delete",
+                    mewId: existingInfo.mewId,
+                    mewUserRootUrl: userRootUrl,
+                });
+            }
+        }
+
+        // Send delete operations in chunks
+        if (deleteOps.length > 0) {
+            for (let i = 0; i < deleteOps.length; i += BATCH_CHUNK_SIZE) {
+                const chunk = deleteOps.slice(i, i + BATCH_CHUNK_SIZE);
+                try {
+                    await mewApi.sendBatchOperations(chunk);
+                } catch (error) {
+                    console.error(
+                        `[MewContacts] Batch delete failed for chunk starting at index ${i}:`,
+                        error
+                    );
+                    throw new Error(
+                        `Batch delete failed on chunk ${
+                            i / BATCH_CHUNK_SIZE + 1
+                        }, stopping sync.`
+                    );
+                }
+            }
+            console.log(`[MewContacts] Deleted ${deleteOps.length} contacts`);
+        }
     }
 }
 
-// Script execution entry point check using ES module standards
+/**
+ * Starts the contact change listener process.
+ * This function spawns the Python script and handles its output stream.
+ */
+function startContactListener() {
+    const pythonProcess = spawn("python3", ["get_contacts_json.py"]);
+    let buffer = "";
+
+    pythonProcess.stdout.on("data", async (data) => {
+        buffer += data.toString();
+
+        // Process complete messages (separated by newlines)
+        const messages = buffer.split("\n");
+        buffer = messages.pop() || ""; // Keep the last incomplete message in the buffer
+
+        for (const message of messages) {
+            if (message.trim()) {
+                // Skip empty lines
+                try {
+                    const update = JSON.parse(message);
+                    console.log(
+                        `[MewContacts] Received ${update.type} update with ${update.contacts.length} contacts`
+                    );
+
+                    if (update.type === "initial") {
+                        await processContacts(
+                            userRootUrlGlobal!,
+                            JSON.stringify(update.contacts)
+                        );
+                    } else if (update.type === "update") {
+                        // Handle changed contacts
+                        if (update.contacts.length > 0) {
+                            await processContacts(
+                                userRootUrlGlobal!,
+                                JSON.stringify(update.contacts)
+                            );
+                        }
+
+                        // Handle deleted contacts
+                        if (
+                            update.deleted_contacts &&
+                            update.deleted_contacts.length > 0
+                        ) {
+                            console.log(
+                                `[MewContacts] Processing ${update.deleted_contacts.length} deleted contacts`
+                            );
+                            const { folderId: contactsFolderId } =
+                                await ensureMyContactsFolder();
+                            if (!contactsFolderId) {
+                                throw new Error(
+                                    "Failed to find contacts folder"
+                                );
+                            }
+
+                            // Fetch existing contacts to get their Mew IDs
+                            const existingContactsMap =
+                                await fetchExistingContactInfo(
+                                    contactsFolderId
+                                );
+                            const operations: Operation[] = [];
+
+                            // Generate delete operations for deleted contacts
+                            for (const deletedId of update.deleted_contacts) {
+                                const existingInfo =
+                                    existingContactsMap.get(deletedId);
+                                if (existingInfo) {
+                                    operations.push({
+                                        type: "delete",
+                                        mewId: existingInfo.mewId,
+                                        mewUserRootUrl: userRootUrlGlobal!,
+                                    });
+                                }
+                            }
+
+                            // Send delete operations in batches
+                            if (operations.length > 0) {
+                                console.log(
+                                    `[MewContacts] Sending ${operations.length} delete operations...`
+                                );
+                                for (
+                                    let i = 0;
+                                    i < operations.length;
+                                    i += BATCH_CHUNK_SIZE
+                                ) {
+                                    const chunk = operations.slice(
+                                        i,
+                                        i + BATCH_CHUNK_SIZE
+                                    );
+                                    await mewApi.sendBatchOperations(chunk);
+                                }
+                            }
+                        }
+                    }
+                } catch (error) {
+                    // Only log parsing errors for non-empty messages
+                    if (message.trim()) {
+                        console.error(
+                            "[MewContacts] Error processing update:",
+                            error
+                        );
+                    }
+                }
+            }
+        }
+    });
+
+    pythonProcess.stderr.on("data", (data) => {
+        console.log(data.toString());
+    });
+
+    pythonProcess.on("close", (code) => {
+        console.log(`[MewContacts] Python process exited with code ${code}`);
+        // Attempt to restart the process after a delay
+        setTimeout(startContactListener, 5000);
+    });
+
+    pythonProcess.on("error", (error) => {
+        console.error("[MewContacts] Failed to start Python process:", error);
+        // Attempt to restart the process after a delay
+        setTimeout(startContactListener, 5000);
+    });
+}
+
+// Update the main execution block to use ES module syntax
 const currentFilePath = fileURLToPath(import.meta.url);
-// Resolve the path provided by Node.js when executing the script
 const scriptPath = resolve(process.argv[1]);
 
-// Check if the current file path matches the executed script path
-// This ensures the main logic only runs when the script is executed directly,
-// not when imported as a module.
 if (currentFilePath === scriptPath) {
-    // --- Main script execution logic starts here ---
     const args = process.argv.slice(2);
     if (args.length !== 1) {
-        console.error("Usage: node <script.js> <userRootUrl>");
+        console.error("Usage: node mewContacts.js <user_root_url>");
         process.exit(1);
     }
 
-    const userRootUrlArg = args[0];
+    userRootUrlGlobal = args[0];
+    startContactListener();
+}
 
-    try {
-        console.log("[MewContacts] Fetching contacts via Python script...");
-        // Execute the Python script and capture stdout
-        const pythonOutput = execSync("python3 get_contacts_json.py", {
-            encoding: "utf8",
-            // Increase maxBuffer if needed for very large contact lists, though stderr logging is preferred.
-            // maxBuffer: 1024 * 1024 * 10, // Example: 10MB
-        });
+function generateOperations(
+    appleContacts: AppleContact[],
+    mewContacts: MewContact[],
+    mewUserRootUrl: string
+): Operation[] {
+    const operations: Operation[] = [];
+    const mewContactMap = new Map(mewContacts.map((c) => [c.id, c]));
+    const processedMewIds = new Set<string>();
 
-        console.log("[MewContacts] Parsing fetched contacts...");
-        // Parse the JSON output from the Python script
-        const contactsData = JSON.parse(pythonOutput);
+    // First pass: Update existing contacts and track which Mew contacts we've processed
+    for (const appleContact of appleContacts) {
+        const mewId = appleContactToMewId(appleContact);
+        if (!mewId) continue;
 
-        if (!Array.isArray(contactsData)) {
-            throw new Error("Python script did not return a JSON array.");
+        processedMewIds.add(mewId);
+        const mewContact = mewContactMap.get(mewId);
+        if (!mewContact) continue;
+
+        // Only generate operations if there are actual changes
+        const contactOperations = generateContactOperations(
+            appleContact,
+            mewContact,
+            mewUserRootUrl
+        );
+        if (contactOperations.length > 0) {
+            operations.push(...contactOperations);
         }
+    }
 
+    // Second pass: Delete Mew contacts that don't exist in Apple contacts
+    for (const mewContact of mewContacts) {
+        if (!processedMewIds.has(mewContact.id)) {
+            operations.push({
+                type: "delete",
+                mewId: mewContact.id,
+                mewUserRootUrl,
+            });
+        }
+    }
+
+    return operations;
+}
+
+function appleContactToMewId(appleContact: AppleContact): string | null {
+    // Extract the Mew ID from the Apple contact's note
+    if (!appleContact.note) return null;
+    const match = appleContact.note.match(/Mew ID: ([a-f0-9-]+)/);
+    return match ? match[1] : null;
+}
+
+function normalizeValue(value: string): string {
+    return value.toLowerCase().trim();
+}
+
+function generateContactOperations(
+    appleContact: AppleContact,
+    mewContact: MewContact,
+    mewUserRootUrl: string
+): Operation[] {
+    const operations: Operation[] = [];
+    const processedPropertyTypes = new Set<string>();
+
+    // Check for properties to delete
+    const propertiesToDelete = mewContact.properties.filter((prop) => {
+        // Skip appleContactId as it should never be deleted
+        if (prop.type === "appleContactId") return false;
+
+        // Check if this property exists in the Apple contact
+        const exists =
+            // Check phone numbers
+            appleContact.phoneNumbers?.some(
+                (phone) =>
+                    prop.type === `phone_${phone.label?.toLowerCase() || ""}` &&
+                    normalizeValue(prop.value || "") ===
+                        normalizeValue(phone.value)
+            ) ||
+            false ||
+            // Check email addresses
+            appleContact.emailAddresses?.some(
+                (email) =>
+                    prop.type === `email_${email.label?.toLowerCase() || ""}` &&
+                    normalizeValue(prop.value || "") ===
+                        normalizeValue(email.value)
+            ) ||
+            false ||
+            // Check organization name
+            (prop.type === "organization" &&
+                prop.value === appleContact.organizationName) ||
+            // Check note
+            (prop.type === "note" && prop.value === appleContact.note);
+
+        return !exists;
+    });
+
+    if (propertiesToDelete.length > 0) {
         console.log(
-            `[MewContacts] Received ${contactsData.length} contacts. Starting sync process...`
+            `[MewContacts]  - Checking for ${propertiesToDelete.length} properties to delete...`
         );
-        // Call the main processing function with the fetched data
-        // Pass the raw JSON string, as processContacts handles parsing
-        processContacts(userRootUrlArg, pythonOutput).catch((err) => {
-            console.error(
-                "[MewContacts] Unhandled error during contact processing:",
-                err
-            );
-            process.exit(1);
-        });
-    } catch (error) {
-        console.error(
-            "[MewContacts] Failed to fetch or parse contacts from Python script:",
-            error
-        );
-        // Check if it's a process error (e.g., python not found, script error)
-        if (error instanceof Error && "stderr" in error) {
-            console.error(
-                "[MewContacts] Python stderr:",
-                (error as any).stderr?.toString()
-            );
+        for (const prop of propertiesToDelete) {
+            operations.push({
+                type: "delete",
+                mewId: mewContact.id,
+                mewUserRootUrl,
+                propertyId: prop.id,
+            });
+            processedPropertyTypes.add(prop.type);
         }
-        process.exit(1);
     }
 
-    // --- Main script execution logic ends here ---
+    // Check for properties to add or update
+    // Handle phone numbers
+    if (appleContact.phoneNumbers) {
+        for (const phone of appleContact.phoneNumbers) {
+            const propType = `phone_${phone.label?.toLowerCase() || ""}`;
+            if (processedPropertyTypes.has(propType)) continue;
+
+            const existingProp = mewContact.properties.find(
+                (prop) => prop.type === propType
+            );
+            if (!existingProp) {
+                operations.push({
+                    type: "add",
+                    mewId: mewContact.id,
+                    mewUserRootUrl,
+                    property: {
+                        type: propType,
+                        value: phone.value,
+                    },
+                });
+            } else if (
+                normalizeValue(existingProp.value || "") !==
+                normalizeValue(phone.value)
+            ) {
+                operations.push({
+                    type: "update",
+                    mewId: mewContact.id,
+                    mewUserRootUrl,
+                    propertyId: existingProp.id,
+                    property: {
+                        type: propType,
+                        value: phone.value,
+                    },
+                });
+            }
+            processedPropertyTypes.add(propType);
+        }
+    }
+
+    // Handle email addresses
+    if (appleContact.emailAddresses) {
+        for (const email of appleContact.emailAddresses) {
+            const propType = `email_${email.label?.toLowerCase() || ""}`;
+            if (processedPropertyTypes.has(propType)) continue;
+
+            const existingProp = mewContact.properties.find(
+                (prop) => prop.type === propType
+            );
+            if (!existingProp) {
+                operations.push({
+                    type: "add",
+                    mewId: mewContact.id,
+                    mewUserRootUrl,
+                    property: {
+                        type: propType,
+                        value: email.value,
+                    },
+                });
+            } else if (
+                normalizeValue(existingProp.value || "") !==
+                normalizeValue(email.value)
+            ) {
+                operations.push({
+                    type: "update",
+                    mewId: mewContact.id,
+                    mewUserRootUrl,
+                    propertyId: existingProp.id,
+                    property: {
+                        type: propType,
+                        value: email.value,
+                    },
+                });
+            }
+            processedPropertyTypes.add(propType);
+        }
+    }
+
+    // Handle organization name
+    if (
+        appleContact.organizationName &&
+        !processedPropertyTypes.has("organization")
+    ) {
+        const existingProp = mewContact.properties.find(
+            (prop) => prop.type === "organization"
+        );
+        if (!existingProp) {
+            operations.push({
+                type: "add",
+                mewId: mewContact.id,
+                mewUserRootUrl,
+                property: {
+                    type: "organization",
+                    value: appleContact.organizationName,
+                },
+            });
+        } else if (existingProp.value !== appleContact.organizationName) {
+            operations.push({
+                type: "update",
+                mewId: mewContact.id,
+                mewUserRootUrl,
+                propertyId: existingProp.id,
+                property: {
+                    type: "organization",
+                    value: appleContact.organizationName,
+                },
+            });
+        }
+        processedPropertyTypes.add("organization");
+    }
+
+    // Handle note
+    if (appleContact.note && !processedPropertyTypes.has("note")) {
+        const existingProp = mewContact.properties.find(
+            (prop) => prop.type === "note"
+        );
+        if (!existingProp) {
+            operations.push({
+                type: "add",
+                mewId: mewContact.id,
+                mewUserRootUrl,
+                property: {
+                    type: "note",
+                    value: appleContact.note,
+                },
+            });
+        } else if (existingProp.value !== appleContact.note) {
+            operations.push({
+                type: "update",
+                mewId: mewContact.id,
+                mewUserRootUrl,
+                propertyId: existingProp.id,
+                property: {
+                    type: "note",
+                    value: appleContact.note,
+                },
+            });
+        }
+        processedPropertyTypes.add("note");
+    }
+
+    return operations;
 }

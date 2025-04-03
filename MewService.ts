@@ -1334,8 +1334,31 @@ export interface AppleContact {
     phoneNumbers?: { label?: string | null; value: string }[] | null; // CNContactPhoneNumbersKey
     emailAddresses?: { label?: string | null; value: string }[] | null; // CNContactEmailAddressesKey
     note?: string | null; // CNContactNoteKey
-    // Add other keys as needed
+    properties: Array<{
+        type: string;
+        value: string;
+    }>;
 }
+
+export interface MewContact {
+    id: string;
+    properties: Array<{
+        id: string;
+        type: string;
+        value: string;
+    }>;
+}
+
+export type Operation = {
+    type: "add" | "update" | "delete";
+    mewId: string;
+    mewUserRootUrl: string;
+    propertyId?: string;
+    property?: {
+        type: string;
+        value: string;
+    };
+};
 
 // --- Utility Functions (Internal to MewService) ---
 

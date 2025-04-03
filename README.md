@@ -7,6 +7,7 @@ A TypeScript/Node.js application that integrates with macOS Contacts using Pytho
 * Access and display contacts from macOS Contacts
 * Export contacts as JSON
 * TypeScript/Node.js interface with Python backend
+* Real-time contact change detection and syncing
 
 ## Requirements
 
@@ -14,6 +15,7 @@ A TypeScript/Node.js application that integrates with macOS Contacts using Pytho
 * Node.js
 * Python 3
 * `pyobjc-framework-Contacts`
+* Mew account and user root URL
 
 ## Installation
 
@@ -37,10 +39,17 @@ A TypeScript/Node.js application that integrates with macOS Contacts using Pytho
    ```bash
    npx tsc
    ```
-2. Run the application:
+2. Run the application with your Mew user root URL:
    ```bash
-   node dist/mewContacts.js
+   node dist/mewContacts.js <your_mew_user_root_url>
    ```
+   Replace `<your_mew_user_root_url>` with your Mew user root URL.
+
+The application will:
+- Start listening for contact changes
+- Perform an initial sync of all contacts
+- Automatically sync any changes to contacts in real-time
+- Restart the sync process if it crashes
 
 ## Permission Setup
 

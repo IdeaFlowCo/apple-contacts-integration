@@ -8,18 +8,28 @@ from Contacts import (
     CNContactFamilyNameKey, CNContactMiddleNameKey, CNContactNamePrefixKey,
     CNContactNameSuffixKey, CNContactNicknameKey, CNContactOrganizationNameKey,
     CNContactPhoneNumbersKey, CNContactEmailAddressesKey, CNContactNoteKey,
-    CNContactIdentifierKey, CNContactTypeKey
+    CNContactIdentifierKey, CNContactTypeKey, CNContactStoreDidChangeNotification
 )
-from Foundation import NSAutoreleasePool
+from Foundation import (
+    NSAutoreleasePool, NSNotificationCenter, NSObject,
+    NSRunLoop, NSDefaultRunLoopMode, NSDate
+)
 from libdispatch import dispatch_semaphore_create, dispatch_semaphore_wait, dispatch_semaphore_signal, DISPATCH_TIME_FOREVER
 
-def log_stderr(message):
-    """Prints a log message to stderr with a timestamp and script prefix.
+# Global observer to prevent garbage collection
+observer = None
+last_sync_time = 0
+last_contact_ids = set()  # Track last known contact IDs
 
-    Args:
-        message (str): The message to log.
-    """
+def log_stderr(message):
+    """Prints a log message to stderr with a timestamp and script prefix."""
     print(f"[{time.strftime('%H:%M:%S')}][Python] {message}", file=sys.stderr)
+    sys.stderr.flush()  # Ensure log is written immediately
+
+def emit_json(data):
+    """Emits JSON data to stdout with a newline separator."""
+    print(json.dumps(data), flush=True)
+    print("", flush=True)  # Empty line as separator
 
 def get_required_keys():
     """Returns a list of CNContact keys needed for the sync process.
@@ -99,40 +109,46 @@ def request_access(store):
     log_stderr("Contact access granted.")
     return True
 
-def fetch_contacts(store):
-    """Fetches all contacts from the provided CNContactStore.
-
-    Uses a CNContactFetchRequest with the keys defined in KEYS_TO_FETCH.
-    Enumerates contacts and returns them as a list of raw CNContact objects.
-    Handles potential errors during fetching.
-
+def fetch_contacts(store, contact_ids=None):
+    """Fetches contacts from the provided CNContactStore.
+    
     Args:
-        store (CNContactStore): An authorized instance of the contact store.
-
-    Returns:
-        list | None: A list of CNContact objects, or None if fetching fails.
+        store: The CNContactStore instance
+        contact_ids: Optional list of specific contact IDs to fetch. If None, fetches all contacts.
     """
     pool = NSAutoreleasePool.alloc().init()
     log_stderr("Fetching contacts...")
-    all_contacts_raw = []
+    contacts_raw = []
 
     try:
         request = CNContactFetchRequest.alloc().initWithKeysToFetch_(KEYS_TO_FETCH)
         request.setSortOrder_(CNContactSortOrderGivenName)
 
-        # Use ObjC block directly for potentially better performance/stability
-        success, error = store.enumerateContactsWithFetchRequest_error_usingBlock_(
-            request,
-            None,
-            lambda contact, stop: all_contacts_raw.append(contact)
-        )
+        if contact_ids:
+            # Fetch specific contacts
+            for contact_id in contact_ids:
+                try:
+                    contact = store.unifiedContactWithIdentifier_keysToFetch_(
+                        contact_id,
+                        KEYS_TO_FETCH
+                    )
+                    if contact:
+                        contacts_raw.append(contact)
+                except Exception as e:
+                    log_stderr(f"Error fetching contact {contact_id}: {e}")
+        else:
+            # Fetch all contacts
+            success, error = store.enumerateContactsWithFetchRequest_error_usingBlock_(
+                request,
+                None,
+                lambda contact, stop: contacts_raw.append(contact)
+            )
+            if not success:
+                log_stderr(f"Error fetching contacts: {error}")
+                return None
 
-        if not success:
-            log_stderr(f"Error fetching contacts: {error}")
-            return None
-
-        log_stderr(f"Fetched {len(all_contacts_raw)} raw contacts successfully")
-        return all_contacts_raw
+        log_stderr(f"Fetched {len(contacts_raw)} contacts successfully")
+        return contacts_raw
     except Exception as e:
         log_stderr(f"Exception while fetching contacts: {e}")
         return None
@@ -198,25 +214,135 @@ def format_contacts_to_json(contacts_raw):
 
     return contacts_list
 
+class ContactStoreObserver(NSObject):
+    def init(self):
+        self = objc.super(ContactStoreObserver, self).init()
+        if self is None:
+            return None
+        self.contact_store = CNContactStore.alloc().init()
+        self.last_contact_ids = set()
+        return self
+
+    def contactStoreDidChange_(self, notification):
+        try:
+            # Get current contact IDs
+            current_contact_ids = set()
+            contacts = fetch_contacts(self.contact_store)
+            if contacts:
+                for contact in contacts:
+                    current_contact_ids.add(contact.identifier())
+
+            # Find changed and deleted contacts
+            changed_contacts = []
+            deleted_contacts = list(self.last_contact_ids - current_contact_ids)
+
+            # Get full data for changed contacts
+            if current_contact_ids != self.last_contact_ids:
+                changed_contacts = fetch_contacts(self.contact_store, list(current_contact_ids - self.last_contact_ids))
+                if changed_contacts:
+                    for contact in changed_contacts:
+                        contact.change_type = 'added'
+                
+                # Get modified contacts
+                modified_contacts = fetch_contacts(self.contact_store, list(current_contact_ids & self.last_contact_ids))
+                if modified_contacts:
+                    for contact in modified_contacts:
+                        contact.change_type = 'modified'
+                    changed_contacts.extend(modified_contacts)
+
+            # Update last known IDs
+            self.last_contact_ids = current_contact_ids
+
+            # Send update message with only changed contacts
+            if changed_contacts or deleted_contacts:
+                print(json.dumps({
+                    "type": "update",
+                    "contacts": [format_contacts_to_json(c) for c in changed_contacts],
+                    "deleted_contacts": deleted_contacts
+                }))
+                print("", flush=True)  # Empty line as separator
+
+        except Exception as e:
+            log_stderr(f"Unexpected error: {e}")
+            # On error, send full sync to ensure consistency
+            contacts = fetch_contacts(self.contact_store)
+            if contacts:
+                print(json.dumps({
+                    "type": "initial",
+                    "contacts": [format_contacts_to_json(c) for c in contacts]
+                }))
+                print("", flush=True)  # Empty line as separator
+
+def setup_observer(store):
+    """Sets up the contact change observer."""
+    global observer, last_contact_ids
+    observer = ContactStoreObserver.alloc().init()
+    if observer is None:
+        log_stderr("Failed to create observer")
+        return None
+    
+    # Get initial contact IDs
+    initial_contacts = fetch_contacts(store)
+    if initial_contacts is not None:
+        last_contact_ids = {contact.identifier() for contact in initial_contacts}
+        log_stderr(f"Initial contact count: {len(last_contact_ids)}")
+    
+    # Register for notifications
+    NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+        observer,
+        "contactStoreDidChange:",
+        CNContactStoreDidChangeNotification,
+        store
+    )
+    log_stderr("Contact change observer set up successfully")
+    return observer
+
 if __name__ == "__main__":
-    """Main execution block.
-
-    Initializes the contact store, requests access, fetches contacts,
-    formats them to JSON, and prints the JSON array to stdout.
-    Logs progress and errors to stderr.
-    """
+    """Main execution block."""
     store = CNContactStore.alloc().init()
+    pool = NSAutoreleasePool.alloc().init()
 
-    if request_access(store):
-        raw_contacts = fetch_contacts(store)
-        if raw_contacts is not None:
-            formatted_contacts = format_contacts_to_json(raw_contacts)
-            # Print the final JSON array to stdout
-            print(json.dumps(formatted_contacts, indent=2))
-            log_stderr(f"Successfully processed and output {len(formatted_contacts)} contacts as JSON.")
+    try:
+        if request_access(store):
+            # Initial fetch
+            raw_contacts = fetch_contacts(store)
+            if raw_contacts is not None:
+                formatted_contacts = format_contacts_to_json(raw_contacts)
+                current_time = time.time()
+                emit_json({
+                    "type": "initial",
+                    "timestamp": current_time,
+                    "contacts": formatted_contacts
+                })
+                last_sync_time = current_time
+                last_contact_ids = {contact.identifier() for contact in raw_contacts}
+                log_stderr(f"Initial fetch: {len(formatted_contacts)} contacts")
+
+            # Set up change observer
+            observer = setup_observer(store)
+            if observer is None:
+                log_stderr("Failed to set up observer")
+                sys.exit(1)
+
+            log_stderr("Contact change observer set up, waiting for changes...")
+            
+            # Keep the process running
+            run_loop = NSRunLoop.currentRunLoop()
+            while True:
+                run_loop.runMode_beforeDate_(
+                    NSDefaultRunLoopMode,
+                    NSDate.dateWithTimeIntervalSinceNow_(1.0)
+                )
         else:
-            log_stderr("Failed to fetch contacts.")
+            log_stderr("Failed to get contact access")
             sys.exit(1)
-    else:
-        # request_access already logged and exited if needed
-        pass 
+    except KeyboardInterrupt:
+        log_stderr("Received keyboard interrupt, shutting down")
+    except Exception as e:
+        log_stderr(f"Unexpected error: {e}")
+        sys.exit(1)
+    finally:
+        if observer:
+            NSNotificationCenter.defaultCenter().removeObserver_(observer)
+            log_stderr("Removed observer")
+        del pool 
