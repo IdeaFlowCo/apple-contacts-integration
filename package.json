@@ -20,6 +20,9 @@
     "homepage": "https://github.com/ydoc5212/apple-contacts-integration#readme",
     "dependencies": {
         "@types/node-fetch": "^2.6.12",
-        "node-fetch": "^3.3.2"
+        "@types/uuid": "^10.0.0",
+        "node-fetch": "^3.3.2",
+        "uuid": "^11.1.0",
+        "zod": "^3.24.2"
     }
 }

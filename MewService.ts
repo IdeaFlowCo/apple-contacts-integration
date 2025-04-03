@@ -12,6 +12,14 @@ export const AUTH_CONFIG = {
 
 import fetch from "node-fetch";
 import crypto from "crypto";
+import { logger } from "./utils/logger.js";
+import { Cache } from "./utils/cache.js";
+import { RequestQueue } from "./utils/requestQueue.js";
+import {
+    MewAPIError,
+    AuthenticationError,
+    NodeOperationError,
+} from "./types/errors.js";
 
 interface AuthTokenResponse {
     access_token: string;
@@ -109,6 +117,8 @@ export class MewAPI {
     private baseNodeUrl: string;
     private token: string;
     private currentUserId: string;
+    private tokenCache: Cache<string>;
+    private requestQueue: RequestQueue;
 
     /** Initializes the API service with base URLs and empty token/userId. */
     constructor() {
@@ -117,6 +127,8 @@ export class MewAPI {
         this.baseNodeUrl = AUTH_CONFIG.baseNodeUrl;
         this.token = "";
         this.currentUserId = ""; // Will be set from user's root node URL
+        this.tokenCache = new Cache<string>(4 * 60 * 1000); // 4 minutes TTL for tokens
+        this.requestQueue = new RequestQueue(10, 100, 50); // 10 batch size, 100ms max delay, 50 req/s rate limit
     }
 
     /**
@@ -148,13 +160,16 @@ export class MewAPI {
      * @throws {Error} If authentication fails.
      */
     async getAccessToken(): Promise<string> {
-        // Retrieve an access token using Auth0 credentials.
+        const cachedToken = this.tokenCache.get("auth_token");
+        if (cachedToken) {
+            return cachedToken;
+        }
+
         try {
             const response = await fetch(
                 `https://${AUTH_CONFIG.auth0Domain}/oauth/token`,
                 {
                     method: "POST",
-                    // mode: "cors", // Removed - not applicable for node-fetch
                     headers: {
                         "Content-Type": "application/json",
                     },
@@ -168,15 +183,27 @@ export class MewAPI {
             );
 
             if (!response.ok) {
-                throw new Error(`Auth failed: ${response.statusText}`);
+                throw new AuthenticationError(
+                    `Auth failed: ${response.statusText}`,
+                    response.status,
+                    await response.text()
+                );
             }
 
-            const data = (await response.json()) as AuthTokenResponse; // Type assertion
+            const data = (await response.json()) as AuthTokenResponse;
             this.token = data.access_token;
-        } catch (error: unknown) {
-            throw error;
+            this.tokenCache.set("auth_token", this.token);
+            return this.token;
+        } catch (error) {
+            if (error instanceof AuthenticationError) {
+                throw error;
+            }
+            throw new AuthenticationError(
+                `Failed to get access token: ${
+                    error instanceof Error ? error.message : "Unknown error"
+                }`
+            );
         }
-        return this.token;
     }
 
     /**
@@ -190,67 +217,83 @@ export class MewAPI {
         nodeId: string,
         updates: Partial<GraphNode>
     ): Promise<void> {
-        const token = await this.getAccessToken();
-        const transactionId = this.uuid();
-        const timestamp = Date.now();
-        const authorId = this.currentUserId; // Assume updates are made by the current user
+        const startTime = Date.now();
+        try {
+            const token = await this.getAccessToken();
+            const transactionId = this.uuid();
+            const timestamp = Date.now();
+            const authorId = this.currentUserId;
 
-        // Fetch the current node data to get its existing properties
-        const layerData = await this.getLayerData([nodeId]);
-        const existingNode = layerData.data.nodesById[nodeId] as GraphNode;
+            const layerData = await this.getLayerData([nodeId]);
+            const existingNode = layerData.data.nodesById[nodeId] as GraphNode;
 
-        if (!existingNode) {
-            throw new Error(`Node with ID ${nodeId} not found.`);
+            if (!existingNode) {
+                throw new NodeOperationError(
+                    `Node with ID ${nodeId} not found.`,
+                    nodeId
+                );
+            }
+
+            const updatePayload = {
+                operation: "updateNode",
+                oldProps: {
+                    ...existingNode,
+                    content: createNodeContent(existingNode.content),
+                    updatedAt: existingNode.updatedAt,
+                },
+                newProps: {
+                    ...existingNode,
+                    ...updates,
+                    content: updates.content
+                        ? createNodeContent(updates.content)
+                        : createNodeContent(existingNode.content),
+                    id: nodeId,
+                    authorId: existingNode.authorId,
+                    createdAt: existingNode.createdAt,
+                    updatedAt: timestamp,
+                },
+            };
+
+            const payload = {
+                clientId: AUTH_CONFIG.auth0ClientId,
+                userId: authorId,
+                transactionId: transactionId,
+                updates: [updatePayload],
+            };
+
+            const response = await this.requestQueue.enqueue(() =>
+                fetch(`${this.baseUrl}/sync`, {
+                    method: "POST",
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify(payload),
+                })
+            );
+
+            if (!response.ok) {
+                const responseText = await response.text();
+                throw new NodeOperationError(
+                    `Failed to update node ${nodeId}: ${response.statusText}`,
+                    nodeId,
+                    response.status,
+                    responseText
+                );
+            }
+
+            logger.info("Node updated successfully", {
+                nodeId,
+                duration: Date.now() - startTime,
+            });
+        } catch (error) {
+            logger.error("Failed to update node", {
+                nodeId,
+                duration: Date.now() - startTime,
+                error: error instanceof Error ? error.message : "Unknown error",
+            });
+            throw error;
         }
-
-        // Prepare the update payload
-        const updatePayload = {
-            operation: "updateNode",
-            oldProps: {
-                ...existingNode,
-                // Ensure content is in the expected format if not already
-                content: createNodeContent(existingNode.content),
-                updatedAt: existingNode.updatedAt, // Use existing timestamp
-            },
-            newProps: {
-                ...existingNode,
-                ...updates,
-                // Ensure content is in the expected format
-                content: updates.content
-                    ? createNodeContent(updates.content)
-                    : createNodeContent(existingNode.content),
-                id: nodeId, // Ensure ID remains the same
-                authorId: existingNode.authorId, // Keep original author
-                createdAt: existingNode.createdAt, // Keep original creation time
-                updatedAt: timestamp, // Update the timestamp
-            },
-        };
-
-        const payload = {
-            clientId: AUTH_CONFIG.auth0ClientId,
-            userId: authorId,
-            transactionId: transactionId,
-            updates: [updatePayload],
-        };
-
-        const txResponse = await fetch(`${this.baseUrl}/sync`, {
-            method: "POST",
-            headers: {
-                Authorization: `Bearer ${token}`,
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify(payload),
-        });
-
-        if (!txResponse.ok) {
-            const responseText = await txResponse.text();
-            const errMsg = `Failed to update node ${nodeId}: Status ${txResponse.status} ${txResponse.statusText}. Response: ${responseText}`;
-            console.error(errMsg);
-            console.error("Request payload was:", payload);
-            throw new Error(errMsg);
-        }
-
-        console.log(`Node ${nodeId} updated successfully.`);
     }
 
     /**
@@ -536,14 +579,16 @@ export class MewAPI {
             updates: updates,
         };
 
-        const txResponse = await fetch(`${this.baseUrl}/sync`, {
-            method: "POST",
-            headers: {
-                Authorization: `Bearer ${token}`,
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify(payload),
-        });
+        const txResponse = await this.requestQueue.enqueue(() =>
+            fetch(`${this.baseUrl}/sync`, {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify(payload),
+            })
+        );
 
         if (!txResponse.ok) {
             const responseText = await txResponse.text();
@@ -601,23 +646,43 @@ export class MewAPI {
      * @returns {Promise<any>} The layer data payload containing details about the requested objects and related entities.
      * @throws {Error} If the API call fails.
      */
-    async getLayerData(objectIds: string[]): Promise<any> {
-        const token = await this.getAccessToken();
-        const response = await fetch(`${this.baseUrl}/layer`, {
-            method: "POST",
-            headers: {
-                Authorization: `Bearer ${token}`,
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ objectIds }),
-        });
-        if (!response.ok) {
-            throw new Error(
-                `Failed to fetch layer data: ${response.statusText}`
+    async getLayerData(objectIds: string[]): Promise<SyncResponse> {
+        const startTime = Date.now();
+        try {
+            const token = await this.getAccessToken();
+            const response = await this.requestQueue.enqueue(() =>
+                fetch(`${this.baseUrl}/layer`, {
+                    method: "POST",
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({ objectIds }),
+                })
             );
+
+            if (!response.ok) {
+                throw new MewAPIError(
+                    `Failed to fetch layer data: ${response.statusText}`,
+                    response.status,
+                    await response.text()
+                );
+            }
+
+            const layerData = (await response.json()) as SyncResponse;
+            logger.debug("Layer data fetched successfully", {
+                objectIds,
+                duration: Date.now() - startTime,
+            });
+            return layerData;
+        } catch (error) {
+            logger.error("Failed to fetch layer data", {
+                objectIds,
+                duration: Date.now() - startTime,
+                error: error instanceof Error ? error.message : "Unknown error",
+            });
+            throw error;
         }
-        const layerData = await response.json();
-        return layerData;
     }
 
     /**
@@ -918,14 +983,16 @@ export class MewAPI {
         };
 
         try {
-            const txResponse = await fetch(`${this.baseUrl}/sync`, {
-                method: "POST",
-                headers: {
-                    Authorization: `Bearer ${token}`,
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify(payload),
-            });
+            const txResponse = await this.requestQueue.enqueue(() =>
+                fetch(`${this.baseUrl}/sync`, {
+                    method: "POST",
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify(payload),
+                })
+            );
 
             if (!txResponse.ok) {
                 const responseText = await txResponse.text();
@@ -990,14 +1057,16 @@ export class MewAPI {
         };
 
         try {
-            const txResponse = await fetch(`${this.baseUrl}/sync`, {
-                method: "POST",
-                headers: {
-                    Authorization: `Bearer ${token}`,
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify(payload),
-            });
+            const txResponse = await this.requestQueue.enqueue(() =>
+                fetch(`${this.baseUrl}/sync`, {
+                    method: "POST",
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify(payload),
+                })
+            );
 
             if (!txResponse.ok) {
                 const responseText = await txResponse.text();
