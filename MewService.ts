@@ -811,10 +811,21 @@ export class MewAPI {
         contactsToAdd: AppleContact[],
         parentNodeId: string
     ): Promise<Map<string, string>> {
+        console.log(
+            `[MewAPI] Starting batchAddContacts with ${contactsToAdd.length} contacts`
+        );
+        console.log(`[MewAPI] Parent node ID: ${parentNodeId}`);
+
         const token = await this.getAccessToken();
+        console.log(
+            `[MewAPI] Token retrieved successfully: ${token ? "Yes" : "No"}`
+        );
+
         const transactionId = this.uuid();
         const timestamp = Date.now();
         const authorId = this.currentUserId;
+        console.log(`[MewAPI] Author ID: ${authorId}`);
+
         const updates: any[] = [];
         const createdContactsMap = new Map<string, string>();
 
@@ -823,6 +834,7 @@ export class MewAPI {
         );
 
         for (const contact of contactsToAdd) {
+            console.log(`[MewAPI] Processing contact: ${contact.identifier}`);
             const newNodeId = this.uuid();
             const parentChildRelationId = this.uuid();
 
@@ -831,11 +843,18 @@ export class MewAPI {
                 contact.familyName || ""
             }`.trim();
             const displayName =
-                calculatedName || contact.organizationName || "Unnamed Contact"; // Use calculatedName
+                calculatedName || contact.organizationName || "Unnamed Contact";
+            console.log(`[MewAPI] Contact display name: ${displayName}`);
 
             createdContactsMap.set(contact.identifier, newNodeId);
 
             // 1. Add the main contact node
+            const nodeContent = createNodeContent({
+                type: NodeContentType.Text,
+                text: displayName,
+            });
+            console.log(`[MewAPI] Node content created:`, nodeContent);
+
             updates.push({
                 operation: "addNode",
                 node: {
@@ -844,10 +863,7 @@ export class MewAPI {
                     authorId: authorId,
                     createdAt: timestamp,
                     updatedAt: timestamp,
-                    content: createNodeContent({
-                        type: NodeContentType.Text,
-                        text: displayName,
-                    }),
+                    content: nodeContent,
                     isPublic: true,
                     isNewRelatedObjectsPublic: false,
                     canonicalRelationId: parentChildRelationId,
@@ -856,7 +872,7 @@ export class MewAPI {
             });
 
             // 2. Add the parent-child relation
-            updates.push({
+            const relation = {
                 operation: "addRelation",
                 relation: {
                     version: 1,
@@ -878,7 +894,10 @@ export class MewAPI {
                     int: timestamp,
                     frac: crypto.randomBytes(4).toString("hex"),
                 },
-            });
+            };
+            console.log(`[MewAPI] Parent-child relation:`, relation);
+            updates.push(relation);
+
             updates.push({
                 operation: "updateRelationList",
                 relationId: parentChildRelationId,
@@ -896,13 +915,15 @@ export class MewAPI {
             });
 
             // --- 3. Add the appleContactId property node and its relations ---
-            // Ensure we always add the identifier property
             const appleIdOps = this.generatePropertyOperations(
                 newNodeId,
                 "appleContactId",
                 contact.identifier,
                 authorId,
                 timestamp
+            );
+            console.log(
+                `[MewAPI] Generated ${appleIdOps.length} property operations for appleContactId`
             );
             updates.push(...appleIdOps);
 
@@ -920,9 +941,12 @@ export class MewAPI {
 
             for (const propInfo of propertiesToSync) {
                 const data = contact[propInfo.key as keyof AppleContact];
+                console.log(
+                    `[MewAPI] Processing property ${propInfo.key}:`,
+                    data
+                );
 
                 if (propInfo.array && Array.isArray(data)) {
-                    // Handle arrays like phoneNumbers, emailAddresses
                     const items = data as {
                         label?: string | null;
                         value: string;
@@ -944,6 +968,9 @@ export class MewAPI {
                                 authorId,
                                 timestamp
                             );
+                            console.log(
+                                `[MewAPI] Generated ${propOps.length} property operations for ${relationLabel}`
+                            );
                             updates.push(...propOps);
                         }
                     }
@@ -952,7 +979,6 @@ export class MewAPI {
                     typeof data === "string" &&
                     data
                 ) {
-                    // Handle simple string properties
                     const propOps = this.generatePropertyOperations(
                         newNodeId,
                         propInfo.baseLabel,
@@ -960,14 +986,18 @@ export class MewAPI {
                         authorId,
                         timestamp
                     );
+                    console.log(
+                        `[MewAPI] Generated ${propOps.length} property operations for ${propInfo.baseLabel}`
+                    );
                     updates.push(...propOps);
                 }
             }
-            // --- End Other Properties ---
         }
 
+        console.log(`[MewAPI] Total operations generated: ${updates.length}`);
+
         if (updates.length === 0) {
-            console.log("[MewAPI] No contacts to batch add.");
+            console.log("[MewAPI] No operations to send, returning empty map");
             return createdContactsMap;
         }
 
@@ -994,35 +1024,23 @@ export class MewAPI {
                 })
             );
 
+            console.log(`[MewAPI] API Response Status: ${txResponse.status}`);
+
             if (!txResponse.ok) {
                 const responseText = await txResponse.text();
-                // Attempt to parse for more detailed error
-                let detail = responseText;
-                try {
-                    const errorJson = JSON.parse(responseText);
-                    detail = errorJson.detail || responseText;
-                } catch (e) {
-                    /* Ignore parsing error */
-                }
-                const errMsg = `Failed batch add contacts: Status ${txResponse.status} ${txResponse.statusText}. Detail: ${detail}`;
-                console.error(errMsg);
-                // console.error("Request payload was:", JSON.stringify(payload, null, 2)); // Careful logging large payloads
-                throw new Error(errMsg);
+                console.error(`[MewAPI] API Error Response:`, responseText);
+                throw new Error(
+                    `Failed batch add contacts: Status ${txResponse.status} ${txResponse.statusText}. Response: ${responseText}`
+                );
             }
 
             const responseJson = await txResponse.json();
             console.log(
-                `[MewAPI] Batch add transaction successful. Response:`,
-                responseJson // Or summarize if too large
+                `[MewAPI] Batch add transaction successful. Created ${createdContactsMap.size} contacts`
             );
             return createdContactsMap;
         } catch (error) {
-            console.error(
-                "[MewAPI] Error during batch add fetch operation:",
-                error
-            );
-            // Depending on the error, we might want to clear the map or handle partially successful batches
-            // For now, we'll throw, assuming the whole batch failed.
+            console.error("[MewAPI] Error during batch add:", error);
             throw error;
         }
     }

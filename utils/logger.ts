@@ -1,81 +1,41 @@
-import { v4 as uuidv4 } from "uuid";
+import fs from "fs";
+import path from "path";
 
-export enum LogLevel {
-    DEBUG = "DEBUG",
-    INFO = "INFO",
-    WARN = "WARN",
-    ERROR = "ERROR",
+const LOG_DIR = "logs";
+const LOG_FILE = path.join(LOG_DIR, "contact-sync.log");
+
+// Ensure logs directory exists
+if (!fs.existsSync(LOG_DIR)) {
+    fs.mkdirSync(LOG_DIR);
 }
 
-interface LogContext {
-    requestId?: string;
-    userId?: string;
-    nodeId?: string;
-    relationId?: string;
-    transactionId?: string;
-    duration?: number;
-    [key: string]: unknown;
-}
+// Create a write stream for the log file
+const logStream = fs.createWriteStream(LOG_FILE, { flags: "a" });
 
-class Logger {
-    private static instance: Logger;
-    private requestId: string;
-
-    private constructor() {
-        this.requestId = uuidv4();
-    }
-
-    public static getInstance(): Logger {
-        if (!Logger.instance) {
-            Logger.instance = new Logger();
-        }
-        return Logger.instance;
-    }
-
-    private formatMessage(
-        level: LogLevel,
-        message: string,
-        context: LogContext = {}
-    ): string {
+export const logger = {
+    log: (message: string, data?: any) => {
         const timestamp = new Date().toISOString();
-        const baseContext = {
-            timestamp,
-            level,
-            requestId: this.requestId,
-            ...context,
-        };
+        const logMessage = `[${timestamp}] ${message}${
+            data ? "\n" + JSON.stringify(data, null, 2) : ""
+        }\n`;
 
-        return JSON.stringify({
-            ...baseContext,
-            message,
-        });
-    }
+        // Write to console
+        console.log(logMessage);
 
-    public debug(message: string, context: LogContext = {}): void {
-        console.debug(this.formatMessage(LogLevel.DEBUG, message, context));
-    }
+        // Write to file
+        logStream.write(logMessage);
+    },
 
-    public info(message: string, context: LogContext = {}): void {
-        console.info(this.formatMessage(LogLevel.INFO, message, context));
-    }
+    error: (message: string, error?: any) => {
+        const timestamp = new Date().toISOString();
+        const errorMessage = `[${timestamp}] ERROR: ${message}${
+            error ? "\n" + JSON.stringify(error, null, 2) : ""
+        }\n`;
 
-    public warn(message: string, context: LogContext = {}): void {
-        console.warn(this.formatMessage(LogLevel.WARN, message, context));
-    }
+        // Write to console
+        console.error(errorMessage);
 
-    public error(message: string, context: LogContext = {}): void {
-        console.error(this.formatMessage(LogLevel.ERROR, message, context));
-    }
-
-    public setRequestId(requestId: string): void {
-        this.requestId = requestId;
-    }
-
-    public withContext(context: LogContext): Logger {
-        const newLogger = Logger.getInstance();
-        newLogger.requestId = context.requestId || this.requestId;
-        return newLogger;
-    }
-}
-
-export const logger = Logger.getInstance();
+        // Write to file
+        logStream.write(errorMessage);
+    },
+};
