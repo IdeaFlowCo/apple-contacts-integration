@@ -282,7 +282,7 @@ export class MewAPI {
                 );
             }
 
-            logger.info("Node updated successfully", {
+            logger.log("Node updated successfully", {
                 nodeId,
                 duration: Date.now() - startTime,
             });
@@ -670,7 +670,7 @@ export class MewAPI {
             }
 
             const layerData = (await response.json()) as SyncResponse;
-            logger.debug("Layer data fetched successfully", {
+            logger.log("Layer data fetched successfully", {
                 objectIds,
                 duration: Date.now() - startTime,
             });
