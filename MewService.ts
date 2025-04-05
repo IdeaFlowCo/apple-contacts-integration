@@ -116,36 +116,60 @@ export class MewAPI {
     private baseUrl: string;
     private baseNodeUrl: string;
     private token: string;
-    private currentUserId: string;
+    private currentUserRootNodeId: string;
+    private authorId: string;
     private tokenCache: Cache<string>;
     private requestQueue: RequestQueue;
 
-    /** Initializes the API service with base URLs and empty token/userId. */
+    /** Initializes the API service with base URLs and empty IDs. */
     constructor() {
         // Use the base URL from our AUTH_CONFIG
         this.baseUrl = AUTH_CONFIG.baseUrl;
         this.baseNodeUrl = AUTH_CONFIG.baseNodeUrl;
         this.token = "";
-        this.currentUserId = ""; // Will be set from user's root node URL
+        this.currentUserRootNodeId = "";
+        this.authorId = "";
         this.tokenCache = new Cache<string>(4 * 60 * 1000); // 4 minutes TTL for tokens
         this.requestQueue = new RequestQueue(10, 100, 50); // 10 batch size, 100ms max delay, 50 req/s rate limit
     }
 
     /**
-     * Sets the User ID for the current session.
-     * This ID is used as the default authorId for operations.
-     * @param userId The Mew User ID, typically parsed from the user root URL.
+     * Sets the User's Root Node ID for the current session.
+     * This ID is typically parsed from the user root URL and used for constructing URLs.
+     * @param userRootNodeId The Mew User Root Node ID (e.g., user-root-id-google-oauth2|...).
      */
-    public setCurrentUserId(userId: string): void {
-        this.currentUserId = userId;
+    public setCurrentUserRootNodeId(userRootNodeId: string): void {
+        this.currentUserRootNodeId = userRootNodeId;
     }
 
     /**
-     * Gets the currently set User ID.
-     * @returns An object containing the current user ID, or empty if not set.
+     * Sets the Author ID for the current session.
+     * This ID is the actual user identifier (e.g., google-oauth2|...) used for ownership.
+     * @param authorId The Mew Author ID.
      */
-    public getCurrentUser(): { id: string } {
-        return { id: this.currentUserId };
+    public setAuthorId(authorId: string): void {
+        if (!authorId) {
+            console.warn(
+                "[MewAPI] setAuthorId called with empty or invalid ID."
+            );
+        }
+        this.authorId = authorId;
+    }
+
+    /**
+     * Gets the currently set User Root Node ID.
+     * @returns An object containing the current user root node ID, or empty if not set.
+     */
+    public getCurrentUserRootNodeInfo(): { id: string } {
+        return { id: this.currentUserRootNodeId };
+    }
+
+    /**
+     * Gets the currently set Author ID.
+     * @returns {string} The author ID, or empty if not set.
+     */
+    public getAuthorId(): string {
+        return this.authorId;
     }
 
     /** Generates a UUID v4. */
@@ -222,7 +246,6 @@ export class MewAPI {
             const token = await this.getAccessToken();
             const transactionId = this.uuid();
             const timestamp = Date.now();
-            const authorId = this.currentUserId;
 
             const layerData = await this.getLayerData([nodeId]);
             const existingNode = layerData.data.nodesById[nodeId] as GraphNode;
@@ -256,7 +279,7 @@ export class MewAPI {
 
             const payload = {
                 clientId: AUTH_CONFIG.auth0ClientId,
-                userId: authorId,
+                userId: this.authorId,
                 transactionId: transactionId,
                 updates: [updatePayload],
             };
@@ -305,7 +328,6 @@ export class MewAPI {
     async deleteNode(nodeId: string): Promise<void> {
         const token = await this.getAccessToken();
         const transactionId = this.uuid();
-        const authorId = this.currentUserId;
 
         // Fetch the node data primarily to ensure it exists and potentially
         // get oldProps if needed by the API, though delete often doesn't require oldProps.
@@ -333,7 +355,7 @@ export class MewAPI {
 
         const payload = {
             clientId: AUTH_CONFIG.auth0ClientId,
-            userId: authorId,
+            userId: this.authorId,
             transactionId: transactionId,
             updates: [deletePayload],
         };
@@ -383,7 +405,7 @@ export class MewAPI {
         const { content, parentNodeId, relationLabel, isChecked, authorId } =
             input;
         const nodeContent = createNodeContent(content);
-        const usedAuthorId = authorId ?? this.currentUserId;
+        const usedAuthorId = authorId ?? this.authorId;
         const newNodeId = this.uuid();
         const parentChildRelationId = this.uuid();
         const transactionId = this.uuid();
@@ -785,16 +807,16 @@ export class MewAPI {
         // return `${this.baseNodeUrl}n/${nodeId}`; // Simpler alternative?
 
         // Current implementation assumes a specific path structure including the user ID
-        if (!this.currentUserId) {
+        if (!this.currentUserRootNodeId) {
             console.warn(
-                "[MewAPI] getNodeUrl called before currentUserId is set. URL might be incorrect."
+                "[MewAPI] getNodeUrl called before currentUserRootNodeId is set. URL might be incorrect."
             );
             // Fallback or throw error? For now, construct a potentially incomplete URL.
             return `${this.baseNodeUrl}g/all/global-root-to-users/all/users-to-user-relation-id-unknown/user-root-id-unknown`;
         }
         // Construct the URL using the known base and the user ID pattern
         // This assumes the user ID correctly represents the 'google-oauth2|...' part.
-        return `${this.baseNodeUrl}g/all/global-root-to-users/all/users-to-user-relation-id-${this.currentUserId}/user-root-id-${this.currentUserId}`;
+        return `${this.baseNodeUrl}g/all/global-root-to-users/all/users-to-user-relation-id-${this.currentUserRootNodeId}/user-root-id-${this.currentUserRootNodeId}`;
         // Original hardcoded example: return `${this.baseNodeUrl}g/all/global-root-to-users/all/users-to-user-relation-id/${nodeId}`;
         // This original example seems incorrect as it used the target nodeId in the user path part.
     }
@@ -823,8 +845,14 @@ export class MewAPI {
 
         const transactionId = this.uuid();
         const timestamp = Date.now();
-        const authorId = this.currentUserId;
-        console.log(`[MewAPI] Author ID: ${authorId}`);
+        const authorIdForBatch = this.authorId;
+        if (!authorIdForBatch) {
+            console.error(
+                "[MewAPI] batchAddContacts called before authorId is set. Aborting."
+            );
+            throw new Error("Author ID not set in MewAPI");
+        }
+        console.log(`[MewAPI] Author ID for batch: ${authorIdForBatch}`);
 
         const updates: any[] = [];
         const createdContactsMap = new Map<string, string>();
@@ -860,7 +888,7 @@ export class MewAPI {
                 node: {
                     version: 1,
                     id: newNodeId,
-                    authorId: authorId,
+                    authorId: authorIdForBatch,
                     createdAt: timestamp,
                     updatedAt: timestamp,
                     content: nodeContent,
@@ -877,7 +905,7 @@ export class MewAPI {
                 relation: {
                     version: 1,
                     id: parentChildRelationId,
-                    authorId: authorId,
+                    authorId: authorIdForBatch,
                     createdAt: timestamp,
                     updatedAt: timestamp,
                     fromId: parentNodeId,
@@ -906,7 +934,7 @@ export class MewAPI {
                     int: timestamp,
                     frac: crypto.randomBytes(4).toString("hex"),
                 },
-                authorId: authorId,
+                authorId: authorIdForBatch,
                 type: "all",
                 oldIsPublic: true,
                 newIsPublic: true,
@@ -919,7 +947,7 @@ export class MewAPI {
                 newNodeId,
                 "appleContactId",
                 contact.identifier,
-                authorId,
+                authorIdForBatch,
                 timestamp
             );
             console.log(
@@ -965,7 +993,7 @@ export class MewAPI {
                                 newNodeId,
                                 relationLabel,
                                 item.value,
-                                authorId,
+                                authorIdForBatch,
                                 timestamp
                             );
                             console.log(
@@ -983,7 +1011,7 @@ export class MewAPI {
                         newNodeId,
                         propInfo.baseLabel,
                         data,
-                        authorId,
+                        authorIdForBatch,
                         timestamp
                     );
                     console.log(
@@ -1007,7 +1035,7 @@ export class MewAPI {
         );
         const payload = {
             clientId: AUTH_CONFIG.auth0ClientId,
-            userId: authorId,
+            userId: authorIdForBatch,
             transactionId: transactionId,
             updates: updates,
         };
@@ -1062,14 +1090,20 @@ export class MewAPI {
         }
 
         const token = await this.getAccessToken();
-        const authorId = this.currentUserId;
+        const authorIdForBatch = this.authorId;
+        if (!authorIdForBatch) {
+            console.error(
+                "[MewAPI] sendBatchOperations called before authorId is set. Aborting."
+            );
+            throw new Error("Author ID not set in MewAPI");
+        }
 
         console.log(
-            `[MewAPI] Sending batch transaction ${transactionId} with ${operations.length} operations...`
+            `[MewAPI] Sending batch transaction ${transactionId} with ${operations.length} operations using authorId: ${authorIdForBatch}...`
         );
         const payload = {
             clientId: AUTH_CONFIG.auth0ClientId,
-            userId: authorId,
+            userId: authorIdForBatch,
             transactionId: transactionId,
             updates: operations, // Send the provided operations array
         };
@@ -1128,7 +1162,7 @@ export class MewAPI {
         parentNodeId: string,
         relationLabel: string,
         value: string,
-        authorId: string,
+        authorIdToUse: string,
         timestamp: number
     ): any[] {
         const updates: any[] = [];
@@ -1144,7 +1178,7 @@ export class MewAPI {
             node: {
                 version: 1,
                 id: propertyNodeId,
-                authorId: authorId,
+                authorId: authorIdToUse,
                 createdAt: timestamp,
                 updatedAt: timestamp,
                 content: createNodeContent({
@@ -1164,7 +1198,7 @@ export class MewAPI {
             relation: {
                 version: 1,
                 id: propertyRelationId,
-                authorId: authorId,
+                authorId: authorIdToUse,
                 createdAt: timestamp,
                 updatedAt: timestamp,
                 fromId: parentNodeId,
@@ -1181,7 +1215,7 @@ export class MewAPI {
             relationId: propertyRelationId,
             oldPosition: null,
             newPosition: { int: timestamp, frac: "a0" },
-            authorId: authorId,
+            authorId: authorIdToUse,
             type: "all",
             oldIsPublic: true,
             newIsPublic: true,
@@ -1195,7 +1229,7 @@ export class MewAPI {
             node: {
                 version: 1,
                 id: labelNodeId,
-                authorId: authorId,
+                authorId: authorIdToUse,
                 createdAt: timestamp,
                 updatedAt: timestamp,
                 content: createNodeContent({
@@ -1215,7 +1249,7 @@ export class MewAPI {
             relation: {
                 version: 1,
                 id: propertyTypeRelationId,
-                authorId: authorId,
+                authorId: authorIdToUse,
                 createdAt: timestamp,
                 updatedAt: timestamp,
                 fromId: propertyRelationId,
@@ -1232,7 +1266,7 @@ export class MewAPI {
             relationId: propertyTypeRelationId,
             oldPosition: null,
             newPosition: { int: timestamp, frac: "c0" },
-            authorId: authorId,
+            authorId: authorIdToUse,
             type: "all",
             oldIsPublic: true,
             newIsPublic: true,
@@ -1326,7 +1360,7 @@ export class MewAPI {
  * @returns {string} The extracted Mew User ID.
  * @throws {Error} If the URL format is invalid.
  */
-export const parseNodeIdFromUrl = (url: string): string => {
+export const parseUserRootNodeIdFromUrl = (url: string): string => {
     const regex =
         /^https?:\/\/mew-edge\.ideaflow\.app\/g\/all\/global-root-to-users\/all\/users-to-user-relation-id-[^\/]+\/user-root-id-[^\/]+$/;
     if (!regex.test(url)) {

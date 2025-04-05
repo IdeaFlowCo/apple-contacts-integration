@@ -3,7 +3,7 @@
 import { spawn } from "child_process"; // Changed from execSync to spawn
 import {
     MewAPI,
-    parseNodeIdFromUrl,
+    parseUserRootNodeIdFromUrl,
     getNodeTextContent,
     Relation,
     AppleContact,
@@ -13,6 +13,7 @@ import {
 import { logger } from "./utils/logger.js";
 import { fileURLToPath } from "url";
 import { resolve } from "path";
+import { setTimeout } from "timers";
 
 // --- Type Definitions ---
 
@@ -46,34 +47,54 @@ const BATCH_CHUNK_SIZE = 50;
 // --- Helper Functions ---
 
 /**
- * Retrieves the Mew User ID by parsing the globally set user root URL.
- * Sets the user ID in the MewAPI instance upon first retrieval.
+ * Parses the globally set user root URL to extract the root node ID and author ID,
+ * then sets them in the MewAPI instance.
  * @throws {Error} If the global user root URL is not set or invalid.
- * @returns {Promise<string>} The Mew User ID.
  */
-async function getUserId(): Promise<string> {
+function initializeApiConfigFromRootUrl(): void {
+    // Renamed and modified
     if (!userRootUrlGlobal) {
         throw new Error(
             "User root URL not provided. Pass it as a command-line argument."
         );
     }
     try {
-        const rootNodeId = parseNodeIdFromUrl(userRootUrlGlobal);
-        // Set the user ID in the MewAPI instance upon first retrieval
-        mewApi.setCurrentUserId(rootNodeId);
-        return rootNodeId;
+        const rootNodeId = parseUserRootNodeIdFromUrl(userRootUrlGlobal);
+
+        // Extract the actual author ID (e.g., google-oauth2|...) from the rootNodeId
+        const authorIdMatch = rootNodeId.match(/^(?:user-root-id-)?(.*)$/);
+        if (!authorIdMatch || !authorIdMatch[1]) {
+            throw new Error(
+                "Could not extract author ID from root node ID: " + rootNodeId
+            );
+        }
+        const authorId = authorIdMatch[1];
+
+        logger.log("[MewContacts] Initializing MewAPI config:", {
+            rootNodeId,
+            authorId,
+        });
+
+        // Set both IDs in the MewAPI instance
+        mewApi.setCurrentUserRootNodeId(rootNodeId);
+        mewApi.setAuthorId(authorId);
+
+        // No return value needed, just sets config
     } catch (error) {
         logger.error(
-            `Failed to parse user root URL: ${userRootUrlGlobal}`,
+            `Failed to initialize API config from user root URL: ${userRootUrlGlobal}`,
             error
         );
-        throw new Error("Invalid user root URL format provided.");
+        throw new Error(
+            "Invalid user root URL format or failed to extract IDs."
+        );
     }
 }
 
 /**
  * Ensures that the target folder (defined by `myContactsFolderName`) exists in Mew
  * under the user's root node. Finds the existing folder or creates a new one.
+ * Assumes `initializeApiConfigFromRootUrl` has already been called.
  * @returns {Promise<{ folderId: string; created: boolean }>} An object containing the Node ID
  *          of the folder and a boolean indicating if it was newly created in this run.
  * @throws {Error} If unable to get user ID or create/find the folder.
@@ -83,18 +104,19 @@ export async function ensureMyContactsFolder(): Promise<{
     created: boolean;
 }> {
     logger.log(`[MewContacts] Ensuring folder: ${myContactsFolderName}`);
-    let rootNodeId;
     let created = false; // Flag to track if we created the folder
 
-    try {
-        rootNodeId = await getUserId(); // This also sets the userId in the mewApi instance
-        logger.log("[MewContacts] Using root node ID:", rootNodeId);
-    } catch (error) {
-        logger.error("[MewContacts] Failed to get root node ID:", error);
+    // Get the root node ID directly from the API instance (assuming it's set)
+    const rootNodeId = mewApi.getCurrentUserRootNodeInfo().id;
+    if (!rootNodeId) {
         throw new Error(
-            "Failed to get root node ID for ensuring contacts folder."
+            "Root node ID not set in MewAPI. Ensure initializeApiConfigFromRootUrl was called."
         );
     }
+    logger.log(
+        "[MewContacts] Using root node ID from MewAPI config:",
+        rootNodeId
+    );
 
     // Look for existing "My Contacts" folder under the root node
     logger.log(
@@ -118,10 +140,11 @@ export async function ensureMyContactsFolder(): Promise<{
         `[MewContacts] Creating '${myContactsFolderName}' folder under root node '${rootNodeId}'.`
     );
     try {
+        // addNode now uses the internal authorId set via setAuthorId
         const response = await mewApi.addNode({
             content: { type: "text", text: myContactsFolderName },
             parentNodeId: rootNodeId,
-            authorId: rootNodeId, // Use rootNodeId as authorId since it's the user's space
+            // No need to specify authorId here, it uses the one set in the instance
         });
 
         const newContactsFolderId = response.newNodeId;
@@ -422,11 +445,13 @@ async function fetchExistingContactInfo(
  * Mew API operations (add/update/delete) needed to sync the state.
  * @param appleData The Apple Contact data from the source (e.g., macOS Contacts).
  * @param existingInfo Pre-fetched information about the contact in Mew, including its ID, name, and properties.
+ * @param authorId The author ID to use for creating new properties.
  * @returns {Promise<any[]>} A promise that resolves to an array of Mew API operation objects.
  */
 export async function syncContactToMew(
     appleData: AppleContact,
-    existingInfo: ExistingContactInfo
+    existingInfo: ExistingContactInfo,
+    authorId: string
 ): Promise<any[]> {
     // Return array of operations
     const contactDisplayName =
@@ -438,7 +463,6 @@ export async function syncContactToMew(
     );
 
     const mewContactId = existingInfo.mewId;
-    const authorId = await getUserId(); // Get authorId once
     const operations: any[] = []; // Array to collect operations
     const timestamp = Date.now(); // Consistent timestamp for operations in this sync cycle
 
@@ -664,7 +688,7 @@ export async function processContacts(
         format: Array.isArray(contactsData) ? "array" : "object",
     });
 
-    // First pass: Identify contacts that need creation or updates
+    // Refactored Logic: Prioritize existence check over change_type
     for (const contact of contacts) {
         if (!contact || typeof contact !== "object" || !contact.identifier) {
             logger.error("Skipping invalid contact data:", contact);
@@ -674,39 +698,29 @@ export async function processContacts(
         const existingContactInfo = existingMewContactsMap.get(
             contact.identifier
         );
-        const changeType = contact.change_type;
-        logger.log(`[MewContacts] Processing contact: ${contact.identifier}`, {
-            changeType: contact.changeType,
-            phoneNumbers: contact.phoneNumbers?.length || 0,
-            emailAddresses: contact.emailAddresses?.length || 0,
-        });
 
-        // Handle new contacts - add to creation list
-        if (changeType === "added") {
-            logger.log(`Adding contact to create list: ${contact.identifier}`);
-            contactsToCreate.push(contact);
-            continue;
-        }
-
-        // Handle modified contacts - check if they actually need updates
-        if (changeType === "modified" && existingContactInfo) {
-            logger.log(`Adding contact to update list: ${contact.identifier}`);
+        if (existingContactInfo) {
+            // Contact exists in Mew, mark for update to ensure properties are synced
+            logger.log(
+                `[MewContacts] Contact ${contact.identifier} exists in Mew, scheduling for property check/update.`
+            );
             contactsToUpdate.push({
                 appleData: contact,
                 mewId: existingContactInfo.mewId,
             });
-        } else if (!changeType) {
+        } else {
+            // Contact does not exist in Mew, mark for creation
             logger.log(
-                `Contact has no change type, treating as new: ${contact.identifier}`
+                `[MewContacts] Contact ${contact.identifier} not found in Mew, scheduling for creation.`
             );
             contactsToCreate.push(contact);
         }
     }
 
-    logger.log("Contacts to process:", {
+    logger.log("Contacts identified for processing:", {
         toCreate: contactsToCreate.length,
         toUpdate: contactsToUpdate.length,
-        totalContacts: contacts.length,
+        totalFromSource: contacts.length,
     });
 
     // --- Phase 1: Create New Contacts ---
@@ -751,23 +765,33 @@ export async function processContacts(
     if (contactsToUpdate.length > 0) {
         logger.log(`Updating ${contactsToUpdate.length} modified contacts`);
         let allUpdateOps: any[] = [];
-        // Generate update operations for each modified contact
-        for (const updateInfo of contactsToUpdate) {
-            const existingInfo = existingMewContactsMap.get(
-                updateInfo.appleData.identifier
+        const authorId = mewApi.getAuthorId(); // Get authorId once before the loop
+        if (!authorId) {
+            logger.error(
+                "[MewContacts] Author ID not set in MewAPI for updates. Aborting updates."
             );
-            if (!existingInfo) {
-                logger.error(
-                    `Could not find pre-fetched info for existing contact ${updateInfo.mewId}. Skipping update.`
+            // Optionally throw error or handle differently
+        } else {
+            // Generate update operations for each modified contact
+            for (const updateInfo of contactsToUpdate) {
+                const existingInfo = existingMewContactsMap.get(
+                    updateInfo.appleData.identifier
                 );
-                continue;
-            }
-            const contactOps = await syncContactToMew(
-                updateInfo.appleData,
-                existingInfo
-            );
-            if (contactOps.length > 0) {
-                allUpdateOps.push(...contactOps);
+                if (!existingInfo) {
+                    logger.error(
+                        `Could not find pre-fetched info for existing contact ${updateInfo.mewId}. Skipping update.`
+                    );
+                    continue;
+                }
+                // Pass the fetched authorId to syncContactToMew
+                const contactOps = await syncContactToMew(
+                    updateInfo.appleData,
+                    existingInfo,
+                    authorId
+                );
+                if (contactOps.length > 0) {
+                    allUpdateOps.push(...contactOps);
+                }
             }
         }
 
@@ -864,6 +888,18 @@ function startContactListener() {
     const pythonProcess = spawn("python3", ["get_contacts_json.py"]);
     let buffer = "";
 
+    // Initialize API config once when listener starts
+    try {
+        initializeApiConfigFromRootUrl();
+    } catch (initError) {
+        logger.error(
+            "[MewContacts] Critical error initializing API config:",
+            initError
+        );
+        // Decide how to handle this - maybe exit or retry?
+        // For now, log and potentially let the process crash later if URL is needed.
+    }
+
     pythonProcess.stdout.on("data", async (data) => {
         buffer += data.toString();
 
@@ -872,91 +908,122 @@ function startContactListener() {
         buffer = messages.pop() || ""; // Keep the last incomplete message in the buffer
 
         for (const message of messages) {
-            if (message.trim()) {
-                // Skip empty lines
+            const trimmedMessage = message.trim(); // Trim message once
+            if (trimmedMessage) {
+                // Only process non-empty messages
                 try {
-                    const update = JSON.parse(message);
+                    const update = JSON.parse(trimmedMessage); // Parse the trimmed message
                     logger.log(
-                        `[MewContacts] Received ${update.type} update with ${update.contacts.length} contacts`
+                        `[MewContacts] Received update type: ${
+                            update.type
+                        } with ${update.contacts?.length ?? 0} contacts` // Use safe access
                     );
 
-                    if (update.type === "initial") {
+                    // Pass only the contacts array to processContacts
+                    if (
+                        update.type === "initial" &&
+                        Array.isArray(update.contacts)
+                    ) {
                         await processContacts(
-                            userRootUrlGlobal!,
-                            JSON.stringify(update.contacts)
+                            userRootUrlGlobal!, // userRootUrl is still needed by processContacts
+                            JSON.stringify(update.contacts) // Pass only contacts
                         );
                     } else if (update.type === "update") {
                         // Handle changed contacts
-                        if (update.contacts.length > 0) {
+                        if (
+                            Array.isArray(update.contacts) &&
+                            update.contacts.length > 0
+                        ) {
                             await processContacts(
-                                userRootUrlGlobal!,
-                                JSON.stringify(update.contacts)
+                                userRootUrlGlobal!, // userRootUrl is still needed by processContacts
+                                JSON.stringify(update.contacts) // Pass only contacts
                             );
                         }
 
                         // Handle deleted contacts
                         if (
                             update.deleted_contacts &&
+                            Array.isArray(update.deleted_contacts) && // Ensure it's an array
                             update.deleted_contacts.length > 0
                         ) {
                             logger.log(
                                 `[MewContacts] Processing ${update.deleted_contacts.length} deleted contacts`
                             );
-                            const { folderId: contactsFolderId } =
-                                await ensureMyContactsFolder();
-                            if (!contactsFolderId) {
-                                throw new Error(
-                                    "Failed to find contacts folder"
-                                );
-                            }
-
-                            // Fetch existing contacts to get their Mew IDs
-                            const existingContactsMap =
-                                await fetchExistingContactInfo(
-                                    contactsFolderId
-                                );
-                            const operations: Operation[] = [];
-
-                            // Generate delete operations for deleted contacts
-                            for (const deletedId of update.deleted_contacts) {
-                                const existingInfo =
-                                    existingContactsMap.get(deletedId);
-                                if (existingInfo) {
-                                    operations.push({
-                                        type: "delete",
-                                        mewId: existingInfo.mewId,
-                                        mewUserRootUrl: userRootUrlGlobal!,
-                                    });
-                                }
-                            }
-
-                            // Send delete operations in batches
-                            if (operations.length > 0) {
-                                logger.log(
-                                    `[MewContacts] Sending ${operations.length} delete operations...`
-                                );
-                                for (
-                                    let i = 0;
-                                    i < operations.length;
-                                    i += BATCH_CHUNK_SIZE
-                                ) {
-                                    const chunk = operations.slice(
-                                        i,
-                                        i + BATCH_CHUNK_SIZE
+                            try {
+                                // Fetch folder ID and author ID safely
+                                const { folderId: contactsFolderId } =
+                                    await ensureMyContactsFolder(); // Still need folder ID
+                                const authorId = mewApi.getAuthorId();
+                                if (!contactsFolderId || !authorId) {
+                                    throw new Error(
+                                        "Failed to get contacts folder ID or author ID for deletion."
                                     );
-                                    await mewApi.sendBatchOperations(chunk);
                                 }
+
+                                // Fetch existing contacts to get their Mew IDs
+                                const existingContactsMap =
+                                    await fetchExistingContactInfo(
+                                        contactsFolderId
+                                    );
+                                const deleteOperations: any[] = []; // Use more specific type if possible
+
+                                // Generate delete operations for deleted contacts
+                                for (const deletedId of update.deleted_contacts) {
+                                    const existingInfo =
+                                        existingContactsMap.get(deletedId);
+                                    if (existingInfo) {
+                                        // Generate the actual delete operation object
+                                        const deleteOp =
+                                            mewApi._generateDeleteNodeOperation(
+                                                existingInfo.mewId
+                                            );
+                                        deleteOperations.push(deleteOp);
+                                        logger.log(
+                                            `[MewContacts] Generated delete operation for Apple ID: ${deletedId}, Mew ID: ${existingInfo.mewId}`
+                                        );
+                                    } else {
+                                        logger.log(
+                                            `[MewContacts] Could not find Mew ID for deleted Apple ID: ${deletedId}. Skipping deletion.`
+                                        );
+                                    }
+                                }
+
+                                // Send delete operations in batches
+                                if (deleteOperations.length > 0) {
+                                    logger.log(
+                                        `[MewContacts] Sending ${deleteOperations.length} delete operations...`
+                                    );
+                                    for (
+                                        let i = 0;
+                                        i < deleteOperations.length;
+                                        i += BATCH_CHUNK_SIZE
+                                    ) {
+                                        const chunk = deleteOperations.slice(
+                                            i,
+                                            i + BATCH_CHUNK_SIZE
+                                        );
+                                        await mewApi.sendBatchOperations(chunk);
+                                        logger.log(
+                                            `[MewContacts] Sent batch delete operation ${
+                                                i / BATCH_CHUNK_SIZE + 1
+                                            }`
+                                        );
+                                    }
+                                }
+                            } catch (deleteError) {
+                                logger.error(
+                                    "[MewContacts] Error handling deleted contacts:",
+                                    deleteError
+                                );
                             }
                         }
                     }
                 } catch (error) {
-                    // Only log parsing errors for non-empty messages
-                    if (message.trim()) {
-                        logger.error(
-                            "[MewContacts] Error processing update:",
-                            error
-                        );
-                    }
+                    // Log parsing errors only for non-empty messages that failed
+                    logger.error(
+                        `[MewContacts] Error processing update message: "${trimmedMessage}"`, // Log the message that failed
+                        error
+                    );
                 }
             }
         }
