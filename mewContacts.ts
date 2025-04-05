@@ -144,6 +144,7 @@ export async function ensureMyContactsFolder(): Promise<{
         const response = await mewApi.addNode({
             content: { type: "text", text: myContactsFolderName },
             parentNodeId: rootNodeId,
+            isPublic: false, // Make the folder private
             // No need to specify authorId here, it uses the one set in the instance
         });
 
@@ -544,7 +545,8 @@ export async function syncContactToMew(
                             relationLabel,
                             item.value,
                             authorId,
-                            timestamp
+                            timestamp,
+                            false // Make new properties private
                         );
                         operations.push(...addOps);
                     }
@@ -577,7 +579,8 @@ export async function syncContactToMew(
                         relationLabel,
                         value,
                         authorId,
-                        timestamp
+                        timestamp,
+                        false // Make new properties private
                     );
                     operations.push(...addOps);
                 }
@@ -738,7 +741,8 @@ export async function processContacts(
             try {
                 const createdMap = await mewApi.batchAddContacts(
                     chunk,
-                    contactsFolderId.folderId
+                    contactsFolderId.folderId,
+                    false // Make new contacts private
                 );
                 createdCount += createdMap.size;
                 logger.log(

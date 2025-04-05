@@ -394,6 +394,7 @@ export class MewAPI {
         relationLabel?: string;
         isChecked?: boolean;
         authorId?: string;
+        isPublic?: boolean;
     }): Promise<{
         newNodeId: string;
         newRelationLabelNodeId: string;
@@ -402,8 +403,14 @@ export class MewAPI {
         referenceCanonicalRelationId: string;
         isChecked?: boolean;
     }> {
-        const { content, parentNodeId, relationLabel, isChecked, authorId } =
-            input;
+        const {
+            content,
+            parentNodeId,
+            relationLabel,
+            isChecked,
+            authorId,
+            isPublic = true,
+        } = input;
         const nodeContent = createNodeContent(content);
         const usedAuthorId = authorId ?? this.authorId;
         const newNodeId = this.uuid();
@@ -424,7 +431,7 @@ export class MewAPI {
                 createdAt: timestamp,
                 updatedAt: timestamp,
                 content: nodeContent,
-                isPublic: true,
+                isPublic: isPublic,
                 isNewRelatedObjectsPublic: false,
                 canonicalRelationId: parentNodeId
                     ? parentChildRelationId
@@ -446,7 +453,7 @@ export class MewAPI {
                     fromId: parentNodeId,
                     toId: newNodeId,
                     relationTypeId: "child",
-                    isPublic: true,
+                    isPublic: isPublic,
                     canonicalRelationId: null,
                 },
                 fromPos: { int: timestamp, frac: "a0" },
@@ -460,8 +467,8 @@ export class MewAPI {
                 newPosition: { int: timestamp, frac: "a0" },
                 authorId: usedAuthorId,
                 type: "all",
-                oldIsPublic: true,
-                newIsPublic: true,
+                oldIsPublic: isPublic,
+                newIsPublic: isPublic,
                 nodeId: parentNodeId,
                 relatedNodeId: newNodeId,
             });
@@ -481,7 +488,7 @@ export class MewAPI {
                     content: [
                         { type: "text", value: relationLabel, styles: 0 },
                     ],
-                    isPublic: true,
+                    isPublic: isPublic,
                     isNewRelatedObjectsPublic: false,
                     canonicalRelationId: null,
                     isChecked: null,
@@ -499,7 +506,7 @@ export class MewAPI {
                     fromId: parentChildRelationId,
                     toId: relationLabelNodeId,
                     relationTypeId: "__type__",
-                    isPublic: true,
+                    isPublic: isPublic,
                     canonicalRelationId: null,
                 },
                 fromPos: { int: timestamp, frac: "a0" },
@@ -512,8 +519,8 @@ export class MewAPI {
                 newPosition: { int: timestamp, frac: "a0" },
                 authorId: usedAuthorId,
                 type: "all",
-                oldIsPublic: true,
-                newIsPublic: true,
+                oldIsPublic: isPublic,
+                newIsPublic: isPublic,
                 nodeId: parentChildRelationId,
                 relatedNodeId: relationLabelNodeId,
             });
@@ -529,7 +536,7 @@ export class MewAPI {
                     fromId: parentNodeId,
                     toId: newNodeId,
                     relationTypeId: "child",
-                    isPublic: true,
+                    isPublic: isPublic,
                     canonicalRelationId: null,
                 },
                 newProps: {
@@ -541,7 +548,7 @@ export class MewAPI {
                     fromId: parentNodeId,
                     toId: newNodeId,
                     relationTypeId: "child",
-                    isPublic: true,
+                    isPublic: isPublic,
                     canonicalRelationId: newRelationTypeId,
                 },
             });
@@ -560,7 +567,7 @@ export class MewAPI {
                     fromId: parentNodeId,
                     toId: newNodeId,
                     relationTypeId: "child",
-                    isPublic: true,
+                    isPublic: isPublic,
                     canonicalRelationId: null,
                 },
                 newProps: {
@@ -572,7 +579,7 @@ export class MewAPI {
                     fromId: parentNodeId,
                     toId: content.replacementNodeData.referenceNodeId,
                     relationTypeId: "child",
-                    isPublic: true,
+                    isPublic: isPublic,
                     canonicalRelationId:
                         content.replacementNodeData
                             .referenceCanonicalRelationId,
@@ -585,8 +592,8 @@ export class MewAPI {
                 newPosition: { int: timestamp, frac: "a0" },
                 authorId: usedAuthorId,
                 type: "all",
-                oldIsPublic: true,
-                newIsPublic: true,
+                oldIsPublic: isPublic,
+                newIsPublic: isPublic,
                 nodeId: parentNodeId,
                 relatedNodeId: content.replacementNodeData.referenceNodeId,
             });
@@ -826,15 +833,17 @@ export class MewAPI {
      * Designed to efficiently create multiple contacts retrieved from an external source.
      * @param contactsToAdd Array of objects, each containing the identifier (Apple ID) and display name for a contact.
      * @param parentNodeId The Mew Node ID of the parent folder (e.g., "My Contacts") where contacts will be created.
+     * @param isPublic Optional boolean flag to set the privacy of created nodes/relations. Defaults to true (public).
      * @returns {Promise<Map<string, string>>} A Map where keys are Apple Identifiers and values are the newly created Mew Node IDs.
      * @throws {Error} If the batch API call fails.
      */
     async batchAddContacts(
         contactsToAdd: AppleContact[],
-        parentNodeId: string
+        parentNodeId: string,
+        isPublic: boolean = true
     ): Promise<Map<string, string>> {
         console.log(
-            `[MewAPI] Starting batchAddContacts with ${contactsToAdd.length} contacts`
+            `[MewAPI] Starting batchAddContacts with ${contactsToAdd.length} contacts. isPublic=${isPublic}`
         );
         console.log(`[MewAPI] Parent node ID: ${parentNodeId}`);
 
@@ -892,7 +901,7 @@ export class MewAPI {
                     createdAt: timestamp,
                     updatedAt: timestamp,
                     content: nodeContent,
-                    isPublic: true,
+                    isPublic: isPublic,
                     isNewRelatedObjectsPublic: false,
                     canonicalRelationId: parentChildRelationId,
                     isChecked: null,
@@ -911,7 +920,7 @@ export class MewAPI {
                     fromId: parentNodeId,
                     toId: newNodeId,
                     relationTypeId: "child",
-                    isPublic: true,
+                    isPublic: isPublic,
                     canonicalRelationId: null,
                 },
                 fromPos: {
@@ -936,8 +945,8 @@ export class MewAPI {
                 },
                 authorId: authorIdForBatch,
                 type: "all",
-                oldIsPublic: true,
-                newIsPublic: true,
+                oldIsPublic: isPublic,
+                newIsPublic: isPublic,
                 nodeId: parentNodeId,
                 relatedNodeId: newNodeId,
             });
@@ -948,7 +957,8 @@ export class MewAPI {
                 "appleContactId",
                 contact.identifier,
                 authorIdForBatch,
-                timestamp
+                timestamp,
+                isPublic
             );
             console.log(
                 `[MewAPI] Generated ${appleIdOps.length} property operations for appleContactId`
@@ -994,7 +1004,8 @@ export class MewAPI {
                                 relationLabel,
                                 item.value,
                                 authorIdForBatch,
-                                timestamp
+                                timestamp,
+                                isPublic
                             );
                             console.log(
                                 `[MewAPI] Generated ${propOps.length} property operations for ${relationLabel}`
@@ -1012,7 +1023,8 @@ export class MewAPI {
                         propInfo.baseLabel,
                         data,
                         authorIdForBatch,
-                        timestamp
+                        timestamp,
+                        isPublic
                     );
                     console.log(
                         `[MewAPI] Generated ${propOps.length} property operations for ${propInfo.baseLabel}`
@@ -1163,7 +1175,8 @@ export class MewAPI {
         relationLabel: string,
         value: string,
         authorIdToUse: string,
-        timestamp: number
+        timestamp: number,
+        isPublic: boolean
     ): any[] {
         const updates: any[] = [];
         const propertyNodeId = this.uuid();
@@ -1185,7 +1198,7 @@ export class MewAPI {
                     type: NodeContentType.Text,
                     text: value,
                 }),
-                isPublic: true,
+                isPublic: isPublic,
                 isNewRelatedObjectsPublic: false,
                 canonicalRelationId: propertyRelationId,
                 isChecked: null,
@@ -1204,7 +1217,7 @@ export class MewAPI {
                 fromId: parentNodeId,
                 toId: propertyNodeId,
                 relationTypeId: "child", // Generic type
-                isPublic: true,
+                isPublic: isPublic,
                 canonicalRelationId: propertyTypeRelationId, // Link to type relation
             },
             fromPos: { int: timestamp, frac: `a${fracSuffix}` },
@@ -1217,8 +1230,8 @@ export class MewAPI {
             newPosition: { int: timestamp, frac: "a0" },
             authorId: authorIdToUse,
             type: "all",
-            oldIsPublic: true,
-            newIsPublic: true,
+            oldIsPublic: isPublic,
+            newIsPublic: isPublic,
             nodeId: parentNodeId,
             relatedNodeId: propertyNodeId,
         });
@@ -1236,7 +1249,7 @@ export class MewAPI {
                     type: NodeContentType.Text,
                     text: relationLabel,
                 }),
-                isPublic: true,
+                isPublic: isPublic,
                 isNewRelatedObjectsPublic: false,
                 canonicalRelationId: null,
                 isChecked: null,
@@ -1255,7 +1268,7 @@ export class MewAPI {
                 fromId: propertyRelationId,
                 toId: labelNodeId,
                 relationTypeId: "__type__",
-                isPublic: true,
+                isPublic: isPublic,
                 canonicalRelationId: null,
             },
             fromPos: { int: timestamp, frac: `c${fracSuffix}` },
@@ -1268,8 +1281,8 @@ export class MewAPI {
             newPosition: { int: timestamp, frac: "c0" },
             authorId: authorIdToUse,
             type: "all",
-            oldIsPublic: true,
-            newIsPublic: true,
+            oldIsPublic: isPublic,
+            newIsPublic: isPublic,
             nodeId: propertyRelationId,
             relatedNodeId: labelNodeId,
         });
