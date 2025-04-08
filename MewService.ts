@@ -730,20 +730,19 @@ export class MewAPI {
         const { parentNode, childNodes } = await this.getChildNodes({
             parentNodeId,
         });
-        console.log(
-            "findNodeByText: searching for exact text match:",
+        logger.log(
+            "[MewService] findNodeByText: searching for exact text match:",
             nodeText
         );
-        console.log(
-            "findNodeByText: child nodes content:",
-            childNodes
+        logger.log("[MewService] findNodeByText: child nodes content:", {
+            count: childNodes.length,
+            nodes: childNodes
                 .filter((node) => node)
                 .map((node) => ({
                     id: node.id,
-                    content: node.content,
-                    textValue: node.content?.[0]?.value,
-                }))
-        );
+                    textValue: getNodeTextContent(node) ?? "[No text content]",
+                })),
+        });
 
         const node = childNodes.find(
             (node) =>
@@ -753,10 +752,10 @@ export class MewAPI {
                 node.content[0].value === nodeText
         );
 
-        console.log("findNodeByText: found node:", {
+        logger.log("[MewService] findNodeByText: found node:", {
             searchedFor: nodeText,
-            foundNodeContent: node?.content?.[0]?.value,
-            node,
+            foundNodeText: node ? getNodeTextContent(node) : "[Not found]",
+            foundNodeId: node?.id ?? null,
         });
 
         return node;
@@ -775,6 +774,14 @@ export class MewAPI {
         parentNodeId: string;
     }): Promise<{ parentNode: GraphNode; childNodes: GraphNode[] }> {
         const layerData = await this.getLayerData([parentNodeId]);
+
+        // Extra logging for the root node case
+        // if (parentNodeId.startsWith('user-root-id')) {
+        //     logger.log("[MewService] getChildNodes: Raw relationsById for root node", {
+        //         parentNodeId: parentNodeId,
+        //         relations: layerData.data.relationsById
+        //     });
+        // }
 
         const parentNode = layerData.data.nodesById[parentNodeId];
 

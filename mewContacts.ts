@@ -418,6 +418,18 @@ async function fetchExistingContactInfo(
             }
         }
 
+        // Log details before setting the map entry
+        logger.log(
+            `[fetchExistingContactInfo] Processing Node ID: ${contactNodeId}`,
+            {
+                contactName: contactName,
+                foundAppleId: appleIdentifier, // Log the extracted ID (or null)
+                totalPropertiesFound: properties.size, // Log how many properties were parsed
+                // Optionally log all properties found for deep debugging:
+                // propertiesMap: Object.fromEntries(properties.entries()),
+            }
+        );
+
         // Only add to map if we found the essential appleIdentifier
         if (appleIdentifier) {
             existingContactsMap.set(appleIdentifier, {
